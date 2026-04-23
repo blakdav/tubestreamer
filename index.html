@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YTDL</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --surface: #111111;
+      --border: #222222;
+      --accent: #e8ff47;
+      --accent2: #ff4747;
+      --text: #f0f0f0;
+      --muted: #666666;
+      --radius: 4px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Space Mono', monospace;
+      min-height: 100vh;
+      padding: 32px 24px;
+    }
+
+    header {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 48px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 24px;
+    }
+
+    header h1 {
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 2.4rem;
+      letter-spacing: -0.04em;
+      color: var(--accent);
+    }
+
+    header span {
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      gap: 32px;
+      max-width: 1100px;
+    }
+
+    @media (max-width: 768px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+
+    /* --- Download panel --- */
+    .download-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 32px;
+    }
+
+    .download-box label {
+      display: block;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    .input-row input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: 'Space Mono', monospace;
+      font-size: 0.85rem;
+      padding: 12px 16px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .input-row input:focus {
+      border-color: var(--accent);
+    }
+
+    .btn {
+      background: var(--accent);
+      color: #000;
+      border: none;
+      border-radius: var(--radius);
+      font-family: 'Syne', sans-serif;
+      font-weight: 700;
+      font-size: 0.85rem;
+      letter-spacing: 0.06em;
+      padding: 12px 24px;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+      white-space: nowrap;
+    }
+
+    .btn:hover { opacity: 0.88; }
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+    .btn-danger {
+      background: transparent;
+      color: var(--accent2);
+      border: 1px solid var(--accent2);
+      font-size: 0.72rem;
+      padding: 6px 12px;
+    }
+
+    .btn-danger:hover { background: var(--accent2); color: #fff; opacity: 1; }
+
+    /* --- Status bar --- */
+    #status {
+      margin-top: 14px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      min-height: 20px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #status.active { color: var(--accent); }
+    #status.error { color: var(--accent2); }
+    #status.done { color: #7fff7f; }
+
+    .spinner {
+      width: 12px; height: 12px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* --- Video list --- */
+    .section-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+
+    #video-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .video-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } }
+
+    .video-thumb {
+      width: 80px;
+      height: 45px;
+      object-fit: cover;
+      border-radius: 2px;
+      background: var(--border);
+      flex-shrink: 0;
+    }
+
+    .video-thumb-placeholder {
+      width: 80px;
+      height: 45px;
+      background: var(--border);
+      border-radius: 2px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 0.6rem;
+    }
+
+    .video-info { flex: 1; min-width: 0; }
+
+    .video-title {
+      font-family: 'Syne', sans-serif;
+      font-size: 0.88rem;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 6px;
+    }
+
+    .video-meta {
+      display: flex;
+      gap: 16px;
+      font-size: 0.68rem;
+      color: var(--muted);
+    }
+
+    .expiry-warning { color: #ffaa44; }
+    .expiry-ok { color: var(--muted); }
+
+    .empty-state {
+      color: var(--muted);
+      font-size: 0.8rem;
+      padding: 32px 0;
+      text-align: center;
+    }
+
+    /* --- Settings panel --- */
+    .settings-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      position: sticky;
+      top: 24px;
+      align-self: start;
+    }
+
+    .settings-panel h2 {
+      font-family: 'Syne', sans-serif;
+      font-size: 0.95rem;
+      font-weight: 700;
+      margin-bottom: 20px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .setting-row {
+      margin-bottom: 20px;
+    }
+
+    .setting-row label {
+      display: block;
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .setting-row input[type="number"] {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: 'Space Mono', monospace;
+      font-size: 1.1rem;
+      padding: 10px 14px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .setting-row input[type="number"]:focus { border-color: var(--accent); }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+
+    .toggle-label {
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+    }
+
+    .toggle {
+      position: relative;
+      width: 40px;
+      height: 22px;
+    }
+
+    .toggle input { opacity: 0; width: 0; height: 0; }
+
+    .toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: var(--border);
+      border-radius: 22px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .toggle-slider::before {
+      content: '';
+      position: absolute;
+      width: 16px; height: 16px;
+      left: 3px; top: 3px;
+      background: var(--muted);
+      border-radius: 50%;
+      transition: transform 0.2s, background 0.2s;
+    }
+
+    .toggle input:checked + .toggle-slider { background: var(--accent); }
+    .toggle input:checked + .toggle-slider::before {
+      transform: translateX(18px);
+      background: #000;
+    }
+
+    .save-btn {
+      width: 100%;
+      margin-top: 4px;
+    }
+
+    .save-indicator {
+      text-align: center;
+      font-size: 0.68rem;
+      color: #7fff7f;
+      margin-top: 8px;
+      min-height: 16px;
+    }
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 20px 0;
+    }
+
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.72rem;
+      margin-bottom: 8px;
+    }
+
+    .stat-row span:first-child { color: var(--muted); }
+    .stat-row span:last-child { font-weight: 700; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>YTDL</h1>
+  <span>YouTube → Plex pipeline</span>
+</header>
+
+<div class="layout">
+  <main>
+    <div class="download-box">
+      <label>YouTube URL</label>
+      <div class="input-row">
+        <input type="text" id="url-input" placeholder="https://youtube.com/watch?v=..." />
+        <button class="btn" id="dl-btn" onclick="startDownload()">Download</button>
+      </div>
+      <div id="status"></div>
+    </div>
+
+    <div class="section-label" id="list-label">Downloaded Videos</div>
+    <div id="video-list"><div class="empty-state">No videos yet.</div></div>
+  </main>
+
+  <aside>
+    <div class="settings-panel">
+      <h2>Auto-Delete Settings</h2>
+
+      <div class="toggle-row">
+        <span class="toggle-label">Enabled</span>
+        <label class="toggle">
+          <input type="checkbox" id="toggle-enabled" onchange="saveConfig()" />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <div class="setting-row">
+        <label>Delete after (days)</label>
+        <input type="number" id="input-days" min="1" max="365" value="30" onchange="saveConfig()" />
+      </div>
+
+      <button class="btn save-btn" onclick="saveConfig()">Save Settings</button>
+      <div class="save-indicator" id="save-indicator"></div>
+
+      <hr class="divider" />
+
+      <div class="stat-row">
+        <span>Videos stored</span>
+        <span id="stat-count">—</span>
+      </div>
+      <div class="stat-row">
+        <span>Total size</span>
+        <span id="stat-size">—</span>
+      </div>
+
+      <hr class="divider" />
+
+      <button class="btn btn-danger" style="width:100%" onclick="manualCleanup()">Run Cleanup Now</button>
+    </div>
+  </aside>
+</div>
+
+<script>
+  let downloading = false;
+
+  async function loadConfig() {
+    const r = await fetch('/api/config');
+    const c = await r.json();
+    document.getElementById('input-days').value = c.auto_delete_days;
+    document.getElementById('toggle-enabled').checked = c.auto_delete_enabled;
+  }
+
+  async function saveConfig() {
+    const days = parseInt(document.getElementById('input-days').value);
+    const enabled = document.getElementById('toggle-enabled').checked;
+    await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auto_delete_days: days, auto_delete_enabled: enabled })
+    });
+    const ind = document.getElementById('save-indicator');
+    ind.textContent = 'Saved.';
+    setTimeout(() => ind.textContent = '', 2000);
+    loadVideos();
+  }
+
+  async function loadVideos() {
+    const r = await fetch('/api/videos');
+    const videos = await r.json();
+    const list = document.getElementById('video-list');
+    const label = document.getElementById('list-label');
+
+    let totalSize = 0;
+    videos.forEach(v => totalSize += v.size_mb);
+    document.getElementById('stat-count').textContent = videos.length;
+    document.getElementById('stat-size').textContent = totalSize > 1024
+      ? (totalSize / 1024).toFixed(1) + ' GB'
+      : totalSize.toFixed(0) + ' MB';
+
+    if (videos.length === 0) {
+      list.innerHTML = '<div class="empty-state">No videos downloaded yet.</div>';
+      return;
+    }
+
+    label.textContent = `Downloaded Videos (${videos.length})`;
+
+    list.innerHTML = videos.map(v => {
+      const expiryClass = v.expires_in_days < 7 ? 'expiry-warning' : 'expiry-ok';
+      const expiryText = v.expires_in_days > 0
+        ? `expires in ${v.expires_in_days}d`
+        : `<span style="color:var(--accent2)">expired</span>`;
+      const thumb = v.thumbnail
+        ? `<img class="video-thumb" src="${v.thumbnail}" alt="" onerror="this.style.display='none'" />`
+        : `<div class="video-thumb-placeholder">NO THUMB</div>`;
+      const dur = v.duration ? fmtDuration(v.duration) : '—';
+      return `
+        <div class="video-card" id="card-${btoa(v.filename).replace(/=/g,'')}">
+          ${thumb}
+          <div class="video-info">
+            <div class="video-title">${escHtml(v.title)}</div>
+            <div class="video-meta">
+              <span>${dur}</span>
+              <span>${v.size_mb} MB</span>
+              <span>${v.age_days}d old</span>
+              <span class="${expiryClass}">${expiryText}</span>
+            </div>
+          </div>
+          <button class="btn btn-danger" onclick="deleteVideo('${escHtml(v.filename)}')">Delete</button>
+        </div>`;
+    }).join('');
+  }
+
+  async function deleteVideo(filename) {
+    if (!confirm(`Delete "${filename}"?`)) return;
+    await fetch(`/api/delete/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    loadVideos();
+  }
+
+  async function manualCleanup() {
+    const r = await fetch('/api/cleanup', { method: 'POST' });
+    const d = await r.json();
+    alert(`Cleanup complete. Deleted ${d.deleted.length} file(s).`);
+    loadVideos();
+  }
+
+  function startDownload() {
+    if (downloading) return;
+    const url = document.getElementById('url-input').value.trim();
+    if (!url) return;
+
+    downloading = true;
+    const btn = document.getElementById('dl-btn');
+    btn.disabled = true;
+    setStatus('active', 'Connecting...');
+
+    const es = new EventSource(`/api/download?_=${Date.now()}`);
+
+    fetch('/api/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    }).then(res => {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+
+      function pump() {
+        reader.read().then(({ done, value }) => {
+          if (done) {
+            finishing();
+            return;
+          }
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop();
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const d = JSON.parse(line.slice(6));
+                handleEvent(d);
+              } catch {}
+            }
+          }
+          pump();
+        });
+      }
+      pump();
+    });
+
+    function handleEvent(d) {
+      if (d.status === 'starting') setStatus('active', d.msg);
+      else if (d.status === 'downloading') setStatus('active', d.msg);
+      else if (d.status === 'done') {
+        setStatus('done', `✓ ${d.title}`);
+        document.getElementById('url-input').value = '';
+        loadVideos();
+        finishing();
+      } else if (d.status === 'error') {
+        setStatus('error', `✗ ${d.msg}`);
+        finishing();
+      }
+    }
+
+    function finishing() {
+      downloading = false;
+      btn.disabled = false;
+    }
+  }
+
+  document.getElementById('url-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') startDownload();
+  });
+
+  function setStatus(type, msg) {
+    const el = document.getElementById('status');
+    el.className = type;
+    const spinner = type === 'active' ? '<div class="spinner"></div>' : '';
+    el.innerHTML = `${spinner}<span>${escHtml(msg)}</span>`;
+  }
+
+  function fmtDuration(s) {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+    return `${m}:${String(sec).padStart(2,'0')}`;
+  }
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  loadConfig();
+  loadVideos();
+  setInterval(loadVideos, 30000);
+</script>
+</body>
+</html>
