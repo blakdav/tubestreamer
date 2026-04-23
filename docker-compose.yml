@@ -1,7 +1,7 @@
 services:
   ytdl:
     build: .
-    container_name: ytdl
+    container_name: tubestreamer
     restart: unless-stopped
     ports:
       - "5005:5000"          # change 5005 if it conflicts with anything
