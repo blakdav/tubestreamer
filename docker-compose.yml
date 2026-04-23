@@ -1,15 +1,14 @@
 services:
-  ytdl:
-    build: .
+  tubestreamer:
+    image: blakdav/tubestreamer:latest
     container_name: tubestreamer
     restart: unless-stopped
     ports:
-      - "5005:5000"          # change 5005 if it conflicts with anything
+      - "5005:5000"
     volumes:
-      - /mnt/user/media/youtube:/downloads   # point this at your Unraid share
+      - /mnt/user/media/youtube:/downloads
     environment:
       - DOWNLOAD_DIR=/downloads
-    # Optional: join your existing arr network so NPM can proxy it
     # networks:
     #   - arr-stack
     #
