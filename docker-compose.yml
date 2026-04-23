@@ -1,0 +1,18 @@
+services:
+  ytdl:
+    build: .
+    container_name: ytdl
+    restart: unless-stopped
+    ports:
+      - "5005:5000"          # change 5005 if it conflicts with anything
+    volumes:
+      - /mnt/user/media/youtube:/downloads   # point this at your Unraid share
+    environment:
+      - DOWNLOAD_DIR=/downloads
+    # Optional: join your existing arr network so NPM can proxy it
+    # networks:
+    #   - arr-stack
+    #
+    # networks:
+    #   arr-stack:
+    #     external: true
