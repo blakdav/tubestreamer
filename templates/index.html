@@ -515,8 +515,6 @@
     btn.disabled = true;
     setStatus('active', 'Connecting...');
 
-    const es = new EventSource(`/api/download?_=${Date.now()}`);
-
     fetch('/api/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
