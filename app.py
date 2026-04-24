@@ -111,46 +111,54 @@ def list_videos():
 
 @app.route("/api/download", methods=["POST"])
 def download():
+    import queue as queue_module
     url = request.json.get("url", "").strip()
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
-    def generate():
-        yield f"data: {json.dumps({'status': 'starting', 'msg': 'Fetching video info...'})}\n\n"
+    q = queue_module.Queue()
 
-        ydl_opts = {
-            "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "merge_output_format": "mp4",
-            "quiet": True,
-            "no_warnings": True,
-            "writeinfojson": False,
-        }
-
+    def do_download():
         try:
-            # First get info
-            with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
                 info = ydl.extract_info(url, download=False)
                 title = info.get("title", "Unknown")
                 duration = info.get("duration", 0)
                 thumbnail = info.get("thumbnail", "")
 
-            yield f"data: {json.dumps({'status': 'downloading', 'msg': f'Downloading: {title}'})}\n\n"
+            q.put({"status": "downloading", "msg": f"Downloading: {title}"})
 
-            # Download
             downloaded_file = None
+            last_pct = [-1]
+
             def progress_hook(d):
                 nonlocal downloaded_file
-                if d["status"] == "finished":
+                if d["status"] == "downloading":
+                    try:
+                        pct_val = int(float(d.get("downloaded_bytes", 0)) / float(d.get("total_bytes") or d.get("total_bytes_estimate") or 1) * 100)
+                        if pct_val - last_pct[0] >= 5:
+                            last_pct[0] = pct_val
+                            speed = d.get("_speed_str", "").strip()
+                            eta = d.get("_eta_str", "").strip()
+                            q.put({"status": "downloading", "msg": f"{title} — {pct_val}% at {speed}, ETA {eta}"})
+                    except Exception:
+                        pass
+                elif d["status"] == "finished":
                     downloaded_file = d["filename"]
 
-            ydl_opts["progress_hooks"] = [progress_hook]
+            ydl_opts = {
+                "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
+                "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                "merge_output_format": "mp4",
+                "quiet": True,
+                "no_warnings": True,
+                "progress_hooks": [progress_hook],
+            }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
 
             if downloaded_file:
-                # Handle merged file rename (yt-dlp may change extension)
                 if not os.path.exists(downloaded_file):
                     base = os.path.splitext(downloaded_file)[0]
                     for ext in [".mp4", ".mkv", ".webm"]:
@@ -168,12 +176,27 @@ def download():
                     "url": url
                 }
                 save_db(db)
-                yield f"data: {json.dumps({'status': 'done', 'msg': 'Download complete!', 'filename': filename, 'title': title})}\n\n"
+                q.put({"status": "done", "msg": "Download complete!", "filename": filename, "title": title})
             else:
-                yield f"data: {json.dumps({'status': 'error', 'msg': 'Download finished but could not locate file.'})}\n\n"
+                q.put({"status": "error", "msg": "Download finished but could not locate file."})
 
         except Exception as e:
-            yield f"data: {json.dumps({'status': 'error', 'msg': str(e)})}\n\n"
+            q.put({"status": "error", "msg": str(e)})
+
+    t = threading.Thread(target=do_download, daemon=True)
+    t.start()
+
+    def generate():
+        yield f"data: {json.dumps({'status': 'starting', 'msg': 'Fetching video info...'})}\n\n"
+        while True:
+            try:
+                msg = q.get(timeout=30)
+                yield f"data: {json.dumps(msg)}\n\n"
+                if msg["status"] in ("done", "error"):
+                    break
+            except Exception:
+                yield f"data: {json.dumps({'status': 'error', 'msg': 'Timed out waiting for download.'})}\n\n"
+                break
 
     return Response(generate(), mimetype="text/event-stream")
 
