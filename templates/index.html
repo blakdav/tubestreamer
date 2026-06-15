@@ -481,7 +481,7 @@
         : `<div class="video-thumb-placeholder">NO THUMB</div>`;
       const dur = v.duration ? fmtDuration(v.duration) : '—';
       return `
-        <div class="video-card" id="card-${btoa(v.filename).replace(/=/g,'')}">
+        <div class="video-card">
           ${thumb}
           <div class="video-info">
             <div class="video-title">${escHtml(v.title)}</div>
