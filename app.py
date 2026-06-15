@@ -128,11 +128,9 @@ def download():
 
             q.put({"status": "downloading", "msg": f"Downloading: {title}"})
 
-            downloaded_file = None
             last_pct = [-1]
 
             def progress_hook(d):
-                nonlocal downloaded_file
                 if d["status"] == "downloading":
                     try:
                         pct_val = int(float(d.get("downloaded_bytes", 0)) / float(d.get("total_bytes") or d.get("total_bytes_estimate") or 1) * 100)
@@ -143,8 +141,6 @@ def download():
                             q.put({"status": "downloading", "msg": f"{title} — {pct_val}% at {speed}, ETA {eta}"})
                     except Exception:
                         pass
-                elif d["status"] == "finished":
-                    downloaded_file = d["filename"]
 
             ydl_opts = {
                 "outtmpl": os.path.join(DOWNLOAD_DIR, "[%(upload_date)s] %(title)s.%(ext)s"),
@@ -156,17 +152,22 @@ def download():
             }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-
-            if downloaded_file:
-                if not os.path.exists(downloaded_file):
-                    base = os.path.splitext(downloaded_file)[0]
-                    for ext in [".mp4", ".mkv", ".webm"]:
-                        if os.path.exists(base + ext):
-                            downloaded_file = base + ext
+                result_info = ydl.extract_info(url, download=True)
+                final_path = None
+                rds = result_info.get("requested_downloads")
+                if rds:
+                    final_path = rds[0].get("filepath") or rds[0].get("_filename")
+                if not final_path:
+                    guessed = ydl.prepare_filename(result_info)
+                    base, _ = os.path.splitext(guessed)
+                    for ext in ["mp4", "mkv", "webm"]:
+                        candidate = base + "." + ext
+                        if os.path.exists(candidate):
+                            final_path = candidate
                             break
 
-                filename = os.path.basename(downloaded_file)
+            if final_path and os.path.exists(final_path):
+                filename = os.path.basename(final_path)
                 db = load_db()
                 db[filename] = {
                     "title": title,
@@ -178,7 +179,7 @@ def download():
                 save_db(db)
                 q.put({"status": "done", "msg": "Download complete!", "filename": filename, "title": title})
             else:
-                q.put({"status": "error", "msg": "Download finished but could not locate file."})
+                q.put({"status": "error", "msg": "Download finished but could not locate final file."})
 
         except Exception as e:
             q.put({"status": "error", "msg": str(e)})
@@ -215,6 +216,54 @@ def delete_video(filename):
 def manual_cleanup():
     deleted = cleanup_expired()
     return jsonify({"deleted": deleted or []})
+
+@app.route("/api/rescan", methods=["POST"])
+def rescan():
+    db = load_db()
+    video_exts = (".mp4", ".mkv", ".webm")
+
+    # Remove stale entries (file no longer exists, or is a fragment leftover)
+    removed = []
+    for filename in list(db.keys()):
+        filepath = os.path.join(DOWNLOAD_DIR, filename)
+        if not filename.lower().endswith(video_exts) or not os.path.exists(filepath):
+            del db[filename]
+            removed.append(filename)
+
+    # Add any untracked video files found on disk
+    added = []
+    for filename in os.listdir(DOWNLOAD_DIR):
+        if not filename.lower().endswith(video_exts):
+            continue
+        if filename in db:
+            continue
+        filepath = os.path.join(DOWNLOAD_DIR, filename)
+        mtime = os.path.getmtime(filepath)
+        title = os.path.splitext(filename)[0]
+        db[filename] = {
+            "title": title,
+            "thumbnail": "",
+            "duration": 0,
+            "downloaded_at": mtime,
+            "url": ""
+        }
+        added.append(filename)
+
+    save_db(db)
+    return jsonify({"added": added, "removed": removed})
+
+# Clean up leftover audio/video fragments from old (pre-fix) downloads
+@app.route("/api/cleanup-fragments", methods=["POST"])
+def cleanup_fragments():
+    removed = []
+    for filename in os.listdir(DOWNLOAD_DIR):
+        # yt-dlp fragment pattern: ...f<id>.m4a / .webm etc, left behind by old buggy version
+        if ".f1" in filename or ".f2" in filename or ".f3" in filename:
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in (".m4a", ".webm", ".m4v"):
+                os.remove(os.path.join(DOWNLOAD_DIR, filename))
+                removed.append(filename)
+    return jsonify({"removed": removed})
 
 if __name__ == "__main__":
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
