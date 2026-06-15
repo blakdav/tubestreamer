@@ -418,6 +418,11 @@
       <hr class="divider" />
 
       <button class="btn btn-danger" style="width:100%" onclick="manualCleanup()">Run Cleanup Now</button>
+
+      <hr class="divider" />
+
+      <button class="btn btn-danger" style="width:100%; margin-bottom:10px;" onclick="rescan()">Rescan Folder</button>
+      <button class="btn btn-danger" style="width:100%" onclick="cleanupFragments()">Remove Old Fragments</button>
     </div>
   </aside>
 </div>
@@ -502,6 +507,21 @@
     const r = await fetch('/api/cleanup', { method: 'POST' });
     const d = await r.json();
     alert(`Cleanup complete. Deleted ${d.deleted.length} file(s).`);
+    loadVideos();
+  }
+
+  async function rescan() {
+    const r = await fetch('/api/rescan', { method: 'POST' });
+    const d = await r.json();
+    alert(`Rescan complete. Added ${d.added.length}, removed ${d.removed.length} stale entries.`);
+    loadVideos();
+  }
+
+  async function cleanupFragments() {
+    if (!confirm('This deletes leftover .f1xx/.f2xx/.f3xx audio/video fragment files from old downloads. Continue?')) return;
+    const r = await fetch('/api/cleanup-fragments', { method: 'POST' });
+    const d = await r.json();
+    alert(`Removed ${d.removed.length} fragment file(s).`);
     loadVideos();
   }
 
