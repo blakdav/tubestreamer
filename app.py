@@ -147,7 +147,7 @@ def download():
                     downloaded_file = d["filename"]
 
             ydl_opts = {
-                "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title)s.%(ext)s"),
+                "outtmpl": os.path.join(DOWNLOAD_DIR, "[%(upload_date)s] %(title)s.%(ext)s"),
                 "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
                 "merge_output_format": "mp4",
                 "quiet": True,
