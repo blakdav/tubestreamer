@@ -100,7 +100,8 @@ YouTube changes frequently. If downloads start failing, rebuild the image to pul
 
 ```bash
 docker compose down
-docker compose up -d --build --no-cache
+docker compose build --no-cache
+docker compose up -d
 ```
 
 ---
