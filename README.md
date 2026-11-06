@@ -60,6 +60,44 @@ Default port is `5005`. Change it in `docker-compose.yml` if it conflicts with a
 
 ---
 
+## One-click sending
+
+### Brave / Chrome extension (desktop)
+
+The `extension/` folder has a small extension that queues videos without copy-pasting:
+
+- **Toolbar button** (or **Alt+Shift+Y**): sends the current tab.
+- **Right-click a link → Send link to TubeStreamer**: queue videos straight from a feed or playlist without opening them.
+- **Right-click a page → Send this page to TubeStreamer**.
+- The icon shows **✓** when the link is queued, or **!** if it failed (hover the icon for the reason).
+
+Install:
+
+1. Open `brave://extensions` (or `chrome://extensions`) and turn on **Developer mode**.
+2. Click **Load unpacked** and pick the `extension/` folder.
+3. The options page opens: enter the address you use for TubeStreamer (e.g. `https://tubestreamer.example.lan`), click **Save & test**, and allow access to that site when asked.
+
+To update it after a `git pull`, click the reload icon on the extension's card.
+
+### iPhone (Shortcuts share sheet)
+
+A Shortcut puts **Send to TubeStreamer** in the share sheet of the YouTube app and Safari.
+
+1. Open **Shortcuts**, tap **+**, and name it `Send to TubeStreamer`.
+2. Tap the **ⓘ** (details) button, turn on **Show in Share Sheet**, and set the input to **URLs** and **Safari web pages**.
+3. In the *Receive* block at the top, set *If there's no input* to **Get Clipboard**. Running it from the home screen or widget then sends whatever link you copied.
+4. Add a **Get Contents of URL** action:
+   - URL: `https://tubestreamer.example.lan/api/queue` (your address)
+   - Method: **POST**
+   - Request Body: **JSON**, add a **Text** field with key `url` and value **Shortcut Input**
+5. Add a **Show Notification** action with the text `Queued for TubeStreamer`.
+
+Then in YouTube: **Share → More (…) → Send to TubeStreamer**. The phone has to be able to reach the server, so be on home Wi-Fi or the VPN. Turning on *On Demand* in the WireGuard app makes that automatic.
+
+The API accepts several links in one go too: `{"urls": ["...", "..."]}`.
+
+---
+
 ## Auto-Delete
 
 Auto-delete runs in the background every hour. Settings are saved to `.ytdl_config.json` in your downloads folder and persist across container restarts.
@@ -89,8 +127,9 @@ tubestreamer/
 ├── app.py                  # Flask backend
 ├── Dockerfile
 ├── docker-compose.yml
-└── templates/
-    └── index.html          # Web UI
+├── templates/
+│   └── index.html          # Web UI
+└── extension/              # "Send to TubeStreamer" browser extension
 ```
 
 Generated at runtime in your downloads folder:
