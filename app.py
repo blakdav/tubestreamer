@@ -1,10 +1,9 @@
 import os
 import json
 import time
+import uuid
 import threading
-import subprocess
-from datetime import datetime, timedelta
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify
 import yt_dlp
 
 app = Flask(__name__)
@@ -12,6 +11,13 @@ app = Flask(__name__)
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "/downloads")
 DB_FILE = os.path.join(DOWNLOAD_DIR, ".ytdl_db.json")
 CONFIG_FILE = os.path.join(DOWNLOAD_DIR, ".ytdl_config.json")
+QUEUE_FILE = os.path.join(DOWNLOAD_DIR, ".ytdl_queue.json")
+
+# How many finished (done/error/cancelled) jobs to keep visible in the queue
+QUEUE_HISTORY = 50
+
+# The DB is written by the download worker and by API requests; serialize it.
+db_lock = threading.Lock()
 
 DEFAULT_CONFIG = {
     "auto_delete_days": 30,
@@ -25,8 +31,10 @@ def load_db():
     return {}
 
 def save_db(db):
-    with open(DB_FILE, "w") as f:
+    tmp = DB_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(db, f, indent=2)
+    os.replace(tmp, DB_FILE)
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -49,19 +57,20 @@ def cleanup_expired():
     if not config.get("auto_delete_enabled", True):
         return
     days = config.get("auto_delete_days", 30)
-    db = load_db()
     cutoff = time.time() - (days * 86400)
-    to_delete = []
-    for filename, entry in db.items():
-        if entry.get("downloaded_at", 0) < cutoff:
-            filepath = os.path.join(DOWNLOAD_DIR, filename)
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            to_delete.append(filename)
-    for filename in to_delete:
-        del db[filename]
-    if to_delete:
-        save_db(db)
+    with db_lock:
+        db = load_db()
+        to_delete = []
+        for filename, entry in db.items():
+            if entry.get("downloaded_at", 0) < cutoff:
+                filepath = os.path.join(DOWNLOAD_DIR, filename)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                to_delete.append(filename)
+        for filename in to_delete:
+            del db[filename]
+        if to_delete:
+            save_db(db)
     return to_delete
 
 @app.route("/")
@@ -109,105 +118,267 @@ def list_videos():
     result.sort(key=lambda x: x["downloaded_at"], reverse=True)
     return jsonify(result)
 
-@app.route("/api/download", methods=["POST"])
-def download():
-    import queue as queue_module
-    url = request.json.get("url", "").strip()
-    if not url:
-        return jsonify({"error": "No URL provided"}), 400
+# ---------------------------------------------------------------------------
+# Download queue
+#
+# Links are added to an in-memory job list and processed one at a time by a
+# single background worker, so the UI never blocks on a download. The list is
+# mirrored to .ytdl_queue.json so queued links survive a container restart
+# (a job that was mid-download when the container stopped is re-queued).
+# ---------------------------------------------------------------------------
 
-    q = queue_module.Queue()
+jobs = []                       # ordered oldest -> newest
+jobs_cond = threading.Condition()
 
-    def do_download():
-        try:
-            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
-                info = ydl.extract_info(url, download=False)
-                title = info.get("title", "Unknown")
-                duration = info.get("duration", 0)
-                thumbnail = info.get("thumbnail", "")
+ACTIVE_STATES = ("queued", "downloading")
 
-            q.put({"status": "downloading", "msg": f"Downloading: {title}"})
 
-            last_pct = [-1]
+class DownloadCancelled(Exception):
+    pass
 
-            def progress_hook(d):
-                if d["status"] == "downloading":
-                    try:
-                        pct_val = int(float(d.get("downloaded_bytes", 0)) / float(d.get("total_bytes") or d.get("total_bytes_estimate") or 1) * 100)
-                        if pct_val - last_pct[0] >= 5:
-                            last_pct[0] = pct_val
-                            speed = d.get("_speed_str", "").strip()
-                            eta = d.get("_eta_str", "").strip()
-                            q.put({"status": "downloading", "msg": f"{title} — {pct_val}% at {speed}, ETA {eta}"})
-                    except Exception:
-                        pass
 
-            ydl_opts = {
-                "outtmpl": os.path.join(DOWNLOAD_DIR, "%(upload_date>%Y-%m-%d)s %(title)s.%(ext)s"),
-                "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-                "merge_output_format": "mp4",
-                "quiet": True,
-                "no_warnings": True,
-                "progress_hooks": [progress_hook],
-            }
+def _public(job):
+    return {k: v for k, v in job.items() if not k.startswith("_")}
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                result_info = ydl.extract_info(url, download=True)
-                final_path = None
-                rds = result_info.get("requested_downloads")
-                if rds:
-                    final_path = rds[0].get("filepath") or rds[0].get("_filename")
-                if not final_path:
-                    guessed = ydl.prepare_filename(result_info)
-                    base, _ = os.path.splitext(guessed)
-                    for ext in ["mp4", "mkv", "webm"]:
-                        candidate = base + "." + ext
-                        if os.path.exists(candidate):
-                            final_path = candidate
-                            break
 
-            if final_path and os.path.exists(final_path):
-                filename = os.path.basename(final_path)
-                db = load_db()
-                db[filename] = {
-                    "title": title,
-                    "thumbnail": thumbnail,
-                    "duration": duration,
-                    "downloaded_at": time.time(),
-                    "url": url
-                }
-                save_db(db)
-                q.put({"status": "done", "msg": "Download complete!", "filename": filename, "title": title})
-            else:
-                q.put({"status": "error", "msg": "Download finished but could not locate final file."})
+def save_queue():
+    """Persist the job list. Caller must hold jobs_cond."""
+    tmp = QUEUE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump([_public(j) for j in jobs], f, indent=2)
+    os.replace(tmp, QUEUE_FILE)
 
-        except Exception as e:
-            q.put({"status": "error", "msg": str(e)})
 
-    t = threading.Thread(target=do_download, daemon=True)
-    t.start()
+def trim_history():
+    """Drop the oldest finished jobs beyond QUEUE_HISTORY. Caller holds lock."""
+    finished = [j for j in jobs if j["status"] not in ACTIVE_STATES]
+    excess = len(finished) - QUEUE_HISTORY
+    for j in finished[:max(excess, 0)]:
+        jobs.remove(j)
 
-    def generate():
-        yield f"data: {json.dumps({'status': 'starting', 'msg': 'Fetching video info...'})}\n\n"
-        while True:
+
+def load_queue():
+    if not os.path.exists(QUEUE_FILE):
+        return
+    try:
+        with open(QUEUE_FILE, "r") as f:
+            saved = json.load(f)
+    except (OSError, ValueError):
+        return
+    with jobs_cond:
+        for j in saved:
+            if j.get("status") == "downloading":
+                j.update(status="queued", progress=0, msg="Re-queued after restart")
+            jobs.append(j)
+        jobs_cond.notify_all()
+
+
+def new_job(url):
+    return {
+        "id": uuid.uuid4().hex[:12],
+        "url": url,
+        "status": "queued",
+        "title": "",
+        "thumbnail": "",
+        "progress": 0,
+        "msg": "Waiting...",
+        "filename": "",
+        "added_at": time.time(),
+        "finished_at": 0,
+    }
+
+
+def update_job(job, **fields):
+    with jobs_cond:
+        job.update(fields)
+
+
+def finish_job(job, status, msg, **fields):
+    with jobs_cond:
+        job.update(status=status, msg=msg, finished_at=time.time(), **fields)
+        trim_history()
+        save_queue()
+
+
+def remove_partials(base):
+    """Delete yt-dlp leftovers (.part, .ytdl, per-format fragments) for a cancelled job."""
+    if not base:
+        return
+    prefix = os.path.basename(base) + "."
+    for name in os.listdir(DOWNLOAD_DIR):
+        rest = name[len(prefix):]
+        if name.startswith(prefix) and (rest.endswith("part") or rest.endswith("ytdl") or rest.startswith("f")):
             try:
-                msg = q.get(timeout=30)
-                yield f"data: {json.dumps(msg)}\n\n"
-                if msg["status"] in ("done", "error"):
-                    break
-            except Exception:
-                yield f"data: {json.dumps({'status': 'error', 'msg': 'Timed out waiting for download.'})}\n\n"
-                break
+                os.remove(os.path.join(DOWNLOAD_DIR, name))
+            except OSError:
+                pass
 
-    return Response(generate(), mimetype="text/event-stream")
+
+def run_job(job):
+    url = job["url"]
+    base = None
+
+    def progress_hook(d):
+        if job.get("_cancel"):
+            raise DownloadCancelled()
+        if d["status"] == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            if not total:
+                return
+            pct = int(float(d.get("downloaded_bytes", 0)) / float(total) * 100)
+            speed = (d.get("_speed_str") or "").strip()
+            eta = (d.get("_eta_str") or "").strip()
+            update_job(job, progress=pct, msg=f"{pct}% at {speed}, ETA {eta}")
+        elif d["status"] == "finished":
+            update_job(job, msg="Merging...")
+
+    ydl_opts = {
+        "outtmpl": os.path.join(DOWNLOAD_DIR, "%(upload_date>%Y-%m-%d)s %(title)s.%(ext)s"),
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "progress_hooks": [progress_hook],
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            update_job(job, msg="Fetching video info...")
+            info = ydl.extract_info(url, download=False)
+            title = info.get("title", "Unknown")
+            duration = info.get("duration", 0)
+            thumbnail = info.get("thumbnail", "")
+            base = os.path.splitext(ydl.prepare_filename(info))[0]
+            update_job(job, title=title, thumbnail=thumbnail, msg="Starting download...")
+            if job.get("_cancel"):
+                raise DownloadCancelled()
+
+            result_info = ydl.process_ie_result(info, download=True)
+            final_path = None
+            rds = result_info.get("requested_downloads")
+            if rds:
+                final_path = rds[0].get("filepath") or rds[0].get("_filename")
+            if not final_path:
+                for ext in ["mp4", "mkv", "webm"]:
+                    candidate = base + "." + ext
+                    if os.path.exists(candidate):
+                        final_path = candidate
+                        break
+
+        if not (final_path and os.path.exists(final_path)):
+            finish_job(job, "error", "Download finished but could not locate final file.")
+            return
+
+        filename = os.path.basename(final_path)
+        with db_lock:
+            db = load_db()
+            db[filename] = {
+                "title": title,
+                "thumbnail": thumbnail,
+                "duration": duration,
+                "downloaded_at": time.time(),
+                "url": url,
+            }
+            save_db(db)
+        finish_job(job, "done", "Download complete", progress=100, filename=filename)
+
+    except Exception as e:
+        # yt-dlp wraps exceptions raised from hooks, so check the flag too
+        if isinstance(e, DownloadCancelled) or job.get("_cancel"):
+            remove_partials(base)
+            finish_job(job, "cancelled", "Cancelled")
+        else:
+            msg = str(e).replace("ERROR: ", "", 1)
+            finish_job(job, "error", msg)
+
+
+def queue_worker():
+    while True:
+        with jobs_cond:
+            while True:
+                job = next((j for j in jobs if j["status"] == "queued"), None)
+                if job:
+                    break
+                jobs_cond.wait()
+            job.update(status="downloading", progress=0, msg="Starting...")
+            save_queue()
+        run_job(job)
+
+
+def find_job(job_id):
+    return next((j for j in jobs if j["id"] == job_id), None)
+
+
+@app.route("/api/queue", methods=["GET"])
+def get_queue():
+    with jobs_cond:
+        return jsonify([_public(j) for j in jobs])
+
+
+@app.route("/api/queue", methods=["POST"])
+def add_to_queue():
+    """Accepts {"url": "..."} or {"urls": [...]}; a single string may hold
+    several whitespace/newline-separated links (e.g. a multi-line paste)."""
+    data = request.json or {}
+    raw = data.get("urls") or [data.get("url", "")]
+    urls = [u for chunk in raw for u in str(chunk).split() if u.strip()]
+    if not urls:
+        return jsonify({"error": "No URL provided"}), 400
+    with jobs_cond:
+        added = [new_job(u) for u in urls]
+        jobs.extend(added)
+        save_queue()
+        jobs_cond.notify_all()
+    return jsonify([_public(j) for j in added])
+
+
+@app.route("/api/queue/<job_id>", methods=["DELETE"])
+def remove_from_queue(job_id):
+    """Queued -> removed; downloading -> cancelled; finished -> removed from list."""
+    with jobs_cond:
+        job = find_job(job_id)
+        if not job:
+            return jsonify({"error": "Not found"}), 404
+        if job["status"] == "downloading":
+            job["_cancel"] = True
+            job["msg"] = "Cancelling..."
+        else:
+            jobs.remove(job)
+            save_queue()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/queue/<job_id>/retry", methods=["POST"])
+def retry_job(job_id):
+    with jobs_cond:
+        job = find_job(job_id)
+        if not job or job["status"] in ACTIVE_STATES:
+            return jsonify({"error": "Not retryable"}), 400
+        jobs.remove(job)
+        fresh = new_job(job["url"])
+        jobs.append(fresh)
+        save_queue()
+        jobs_cond.notify_all()
+    return jsonify(_public(fresh))
+
+
+@app.route("/api/queue/clear", methods=["POST"])
+def clear_finished():
+    with jobs_cond:
+        jobs[:] = [j for j in jobs if j["status"] in ACTIVE_STATES]
+        save_queue()
+    return jsonify({"ok": True})
+
 
 @app.route("/api/delete/<path:filename>", methods=["DELETE"])
 def delete_video(filename):
     filepath = os.path.join(DOWNLOAD_DIR, filename)
-    db = load_db()
-    if filename in db:
-        del db[filename]
-        save_db(db)
+    with db_lock:
+        db = load_db()
+        if filename in db:
+            del db[filename]
+            save_db(db)
     if os.path.exists(filepath):
         os.remove(filepath)
     return jsonify({"ok": True})
@@ -219,6 +390,10 @@ def manual_cleanup():
 
 @app.route("/api/rescan", methods=["POST"])
 def rescan():
+    with db_lock:
+        return _rescan()
+
+def _rescan():
     db = load_db()
     video_exts = (".mp4", ".mkv", ".webm")
 
@@ -267,6 +442,8 @@ def cleanup_fragments():
 
 if __name__ == "__main__":
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    load_queue()
+    threading.Thread(target=queue_worker, daemon=True).start()
     cleanup_thread = threading.Thread(target=run_cleanup, daemon=True)
     cleanup_thread.start()
     app.run(host="0.0.0.0", port=5000, debug=False)

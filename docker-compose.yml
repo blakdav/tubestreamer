@@ -1,6 +1,6 @@
 services:
   tubestreamer:
-    image: blakdav/tubestreamer:latest
+    image: ghcr.io/blakdav/tubestreamer:latest
     container_name: tubestreamer
     restart: unless-stopped
     ports:

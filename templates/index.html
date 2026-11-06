@@ -360,6 +360,80 @@
 
     .stat-row span:first-child { color: var(--muted); }
     .stat-row span:last-child { font-weight: 700; }
+
+    /* --- Queue --- */
+    #queue-section { margin-bottom: 32px; }
+    #queue-section[hidden] { display: none; }
+
+    .queue-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .queue-head .section-label { margin-bottom: 0; }
+
+    .link-btn {
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-family: 'Space Mono', monospace;
+      font-size: 0.68rem;
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .link-btn:hover { color: var(--text); }
+
+    #queue-list { display: flex; flex-direction: column; gap: 8px; }
+
+    .job {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .job-bar {
+      position: absolute;
+      left: 0; bottom: 0;
+      height: 2px;
+      background: var(--accent);
+      transition: width 0.4s ease;
+    }
+
+    .job-icon { width: 14px; flex-shrink: 0; text-align: center; font-size: 0.8rem; }
+    .job.downloading .job-icon { color: var(--accent); }
+    .job.queued .job-icon,
+    .job.cancelled .job-icon { color: var(--muted); }
+    .job.done .job-icon { color: #7fff7f; }
+    .job.error .job-icon { color: var(--accent2); }
+
+    .job-info { flex: 1; min-width: 0; }
+    .job-title {
+      font-family: 'Syne', sans-serif;
+      font-size: 0.82rem;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .job-msg {
+      font-size: 0.68rem;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+    .job.error .job-msg { color: var(--accent2); }
+
+    .job-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .job-actions .btn { font-size: 0.68rem; padding: 5px 10px; }
   </style>
 </head>
 <body>
@@ -372,12 +446,20 @@
 <div class="layout">
   <main>
     <div class="download-box">
-      <label>YouTube URL</label>
+      <label>YouTube URL — add as many as you like, they download one after another</label>
       <div class="input-row">
         <input type="text" id="url-input" placeholder="https://youtube.com/watch?v=..." />
-        <button class="btn" id="dl-btn" onclick="startDownload()">Download</button>
+        <button class="btn" id="dl-btn" onclick="addToQueue()">Add to Queue</button>
       </div>
       <div id="status"></div>
+    </div>
+
+    <div id="queue-section" hidden>
+      <div class="queue-head">
+        <div class="section-label" id="queue-label">Queue</div>
+        <button class="link-btn" id="clear-btn" onclick="clearFinished()">Clear finished</button>
+      </div>
+      <div id="queue-list"></div>
     </div>
 
     <div class="section-label" id="list-label">Downloaded Videos</div>
@@ -428,8 +510,6 @@
 </div>
 
 <script>
-  let downloading = false;
-
   async function loadConfig() {
     const r = await fetch('/api/config');
     const c = await r.json();
@@ -525,77 +605,122 @@
     loadVideos();
   }
 
-  function startDownload() {
-    if (downloading) return;
-    const url = document.getElementById('url-input').value.trim();
+  // --- Queue -------------------------------------------------------------
+  // Downloads run server-side; the page only adds links and polls status, so
+  // you can keep pasting links (or close the tab) while earlier ones run.
+
+  const ICONS = { queued: '○', downloading: '↓', done: '✓', error: '✗', cancelled: '–' };
+  let queueTimer = null;
+  let lastDoneCount = null;
+
+  async function addToQueue() {
+    const input = document.getElementById('url-input');
+    const url = input.value.trim();
     if (!url) return;
-
-    downloading = true;
-    const btn = document.getElementById('dl-btn');
-    btn.disabled = true;
-    setStatus('active', 'Connecting...');
-
-    fetch('/api/download', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url })
-    }).then(res => {
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-
-      function pump() {
-        reader.read().then(({ done, value }) => {
-          if (done) {
-            finishing();
-            return;
-          }
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split('\n');
-          buf = lines.pop();
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const d = JSON.parse(line.slice(6));
-                handleEvent(d);
-              } catch {}
-            }
-          }
-          pump();
-        });
-      }
-      pump();
-    });
-
-    function handleEvent(d) {
-      if (d.status === 'starting') setStatus('active', d.msg);
-      else if (d.status === 'downloading') setStatus('active', d.msg);
-      else if (d.status === 'done') {
-        setStatus('done', `✓ ${d.title}`);
-        document.getElementById('url-input').value = '';
-        loadVideos();
-        finishing();
-      } else if (d.status === 'error') {
-        setStatus('error', `✗ ${d.msg}`);
-        finishing();
-      }
+    input.value = '';
+    input.focus();
+    try {
+      const r = await fetch('/api/queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Failed to queue');
+      flashStatus('done', d.length > 1 ? `Queued ${d.length} links` : 'Queued');
+    } catch (e) {
+      input.value = url;
+      flashStatus('error', `✗ ${e.message}`);
     }
+    loadQueue();
+  }
 
-    function finishing() {
-      downloading = false;
-      btn.disabled = false;
-    }
+  async function loadQueue() {
+    clearTimeout(queueTimer);
+    let jobs = [];
+    try {
+      const r = await fetch('/api/queue');
+      jobs = await r.json();
+    } catch {}
+    renderQueue(jobs);
+
+    // Refresh the video list whenever another download completes
+    const doneCount = jobs.filter(j => j.status === 'done').length;
+    if (lastDoneCount !== null && doneCount > lastDoneCount) loadVideos();
+    lastDoneCount = doneCount;
+
+    const active = jobs.some(j => j.status === 'queued' || j.status === 'downloading');
+    queueTimer = setTimeout(loadQueue, active ? 1500 : 5000);
+  }
+
+  function renderQueue(jobs) {
+    const section = document.getElementById('queue-section');
+    section.hidden = jobs.length === 0;
+    if (!jobs.length) return;
+
+    // Active jobs first (in queue order), then finished ones newest-first
+    const active = jobs.filter(j => j.status === 'downloading' || j.status === 'queued');
+    const finished = jobs.filter(j => !active.includes(j)).reverse();
+    const pending = active.length;
+    document.getElementById('queue-label').textContent =
+      pending ? `Queue (${pending} remaining)` : 'Queue';
+    document.getElementById('clear-btn').hidden = finished.length === 0;
+
+    document.getElementById('queue-list').innerHTML = [...active, ...finished].map(j => {
+      const title = j.title || j.url;
+      const actions = [];
+      if (j.status === 'error' || j.status === 'cancelled')
+        actions.push(`<button class="btn" onclick="retryJob('${j.id}')">Retry</button>`);
+      if (j.status === 'downloading')
+        actions.push(`<button class="btn btn-danger" onclick="removeJob('${j.id}', true)">Cancel</button>`);
+      else
+        actions.push(`<button class="btn btn-danger" onclick="removeJob('${j.id}')">${j.status === 'queued' ? 'Remove' : '✕'}</button>`);
+      const bar = j.status === 'downloading' ? `<div class="job-bar" style="width:${j.progress}%"></div>` : '';
+      const icon = j.status === 'downloading' ? '<div class="spinner"></div>' : ICONS[j.status] || '';
+      return `
+        <div class="job ${j.status}">
+          <div class="job-icon">${icon}</div>
+          <div class="job-info">
+            <div class="job-title" title="${escHtml(j.url)}">${escHtml(title)}</div>
+            <div class="job-msg">${escHtml(j.msg || '')}</div>
+          </div>
+          <div class="job-actions">${actions.join('')}</div>
+          ${bar}
+        </div>`;
+    }).join('');
+  }
+
+  async function removeJob(id, cancelling) {
+    if (cancelling && !confirm('Cancel this download?')) return;
+    await fetch(`/api/queue/${id}`, { method: 'DELETE' });
+    loadQueue();
+  }
+
+  async function retryJob(id) {
+    await fetch(`/api/queue/${id}/retry`, { method: 'POST' });
+    loadQueue();
+  }
+
+  async function clearFinished() {
+    await fetch('/api/queue/clear', { method: 'POST' });
+    loadQueue();
+  }
+
+  let statusTimer = null;
+  function flashStatus(type, msg) {
+    setStatus(type, msg);
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(() => setStatus('', ''), 2500);
   }
 
   document.getElementById('url-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter') startDownload();
+    if (e.key === 'Enter') addToQueue();
   });
 
   function setStatus(type, msg) {
     const el = document.getElementById('status');
     el.className = type;
-    const spinner = type === 'active' ? '<div class="spinner"></div>' : '';
-    el.innerHTML = `${spinner}<span>${escHtml(msg)}</span>`;
+    el.innerHTML = msg ? `<span>${escHtml(msg)}</span>` : '';
   }
 
   function fmtDuration(s) {
@@ -612,6 +737,7 @@
 
   loadConfig();
   loadVideos();
+  loadQueue();
   setInterval(loadVideos, 30000);
 </script>
 </body>

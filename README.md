@@ -46,9 +46,17 @@ Default port is `5005`. Change it in `docker-compose.yml` if it conflicts with a
 ## Usage
 
 1. Paste a YouTube URL into the input field
-2. Hit **Download** or press Enter
-3. Progress updates live — the video downloads directly to your configured folder
-4. The video list refreshes automatically every 30 seconds
+2. Hit **Add to Queue** or press Enter — the box clears right away so you can paste the next one
+3. Links download one at a time in the background; the **Queue** panel shows live progress for each
+4. Finished videos appear in the video list automatically
+
+### Queue
+
+- Paste several links at once (separated by spaces or newlines) to queue them all in one go.
+- **Remove** drops a link that hasn't started; **Cancel** stops the current download and deletes its partial files.
+- Failed or cancelled items can be **Retry**'d; **Clear finished** tidies up the list.
+- Downloads run server-side, so you can close the tab and they keep going.
+- The queue is saved to `.ytdl_queue.json`, so pending links survive a container restart (an interrupted download resumes).
 
 ---
 
@@ -89,7 +97,8 @@ Generated at runtime in your downloads folder:
 ```
 /your/downloads/folder/
 ├── .ytdl_db.json           # Download history + timestamps
-└── .ytdl_config.json       # Auto-delete settings
+├── .ytdl_config.json       # Auto-delete settings
+└── .ytdl_queue.json        # Download queue (pending + recent)
 ```
 
 ---
