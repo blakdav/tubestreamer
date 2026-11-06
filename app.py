@@ -73,6 +73,16 @@ def cleanup_expired():
             save_db(db)
     return to_delete
 
+@app.before_request
+def require_json_for_changes():
+    """Block cross-site requests: any web page you visit could otherwise make
+    your browser send a plain POST to TubeStreamer (e.g. trigger a cleanup).
+    Requiring a JSON content type makes the browser ask the server first, and
+    since we never allow other sites, those requests are refused. The UI, the
+    extension and the iPhone Shortcut all send JSON."""
+    if request.method in ("POST", "DELETE") and not request.is_json:
+        return jsonify({"error": "Requests must use Content-Type: application/json"}), 415
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -373,6 +383,9 @@ def clear_finished():
 
 @app.route("/api/delete/<path:filename>", methods=["DELETE"])
 def delete_video(filename):
+    # Only plain file names inside DOWNLOAD_DIR: no "../", subfolders or dotfiles
+    if filename != os.path.basename(filename) or filename.startswith("."):
+        return jsonify({"error": "Invalid filename"}), 400
     filepath = os.path.join(DOWNLOAD_DIR, filename)
     with db_lock:
         db = load_db()

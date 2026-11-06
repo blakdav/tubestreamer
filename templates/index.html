@@ -510,6 +510,9 @@
 </div>
 
 <script>
+  // Every change request sends JSON (the server rejects anything else; see app.py)
+  const JSON_HEADERS = { 'Content-Type': 'application/json' };
+
   async function loadConfig() {
     const r = await fetch('/api/config');
     const c = await r.json();
@@ -557,7 +560,7 @@
         ? `expires in ${v.expires_in_days}d`
         : `<span style="color:var(--accent2)">expired</span>`;
       const thumb = v.thumbnail
-        ? `<img class="video-thumb" src="${v.thumbnail}" alt="" onerror="this.style.display='none'" />`
+        ? `<img class="video-thumb" src="${escHtml(v.thumbnail)}" alt="" onerror="this.style.display='none'" />`
         : `<div class="video-thumb-placeholder">NO THUMB</div>`;
       const dur = v.duration ? fmtDuration(v.duration) : '—';
       return `
@@ -572,26 +575,26 @@
               <span class="${expiryClass}">${expiryText}</span>
             </div>
           </div>
-          <button class="btn btn-danger" onclick="deleteVideo('${escHtml(v.filename)}')">Delete</button>
+          <button class="btn btn-danger" data-filename="${escHtml(v.filename)}" onclick="deleteVideo(this.dataset.filename)">Delete</button>
         </div>`;
     }).join('');
   }
 
   async function deleteVideo(filename) {
     if (!confirm(`Delete "${filename}"?`)) return;
-    await fetch(`/api/delete/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    await fetch(`/api/delete/${encodeURIComponent(filename)}`, { method: 'DELETE', headers: JSON_HEADERS });
     loadVideos();
   }
 
   async function manualCleanup() {
-    const r = await fetch('/api/cleanup', { method: 'POST' });
+    const r = await fetch('/api/cleanup', { method: 'POST', headers: JSON_HEADERS });
     const d = await r.json();
     alert(`Cleanup complete. Deleted ${d.deleted.length} file(s).`);
     loadVideos();
   }
 
   async function rescan() {
-    const r = await fetch('/api/rescan', { method: 'POST' });
+    const r = await fetch('/api/rescan', { method: 'POST', headers: JSON_HEADERS });
     const d = await r.json();
     alert(`Rescan complete. Added ${d.added.length}, removed ${d.removed.length} stale entries.`);
     loadVideos();
@@ -599,7 +602,7 @@
 
   async function cleanupFragments() {
     if (!confirm('This deletes leftover .f1xx/.f2xx/.f3xx audio/video fragment files from old downloads. Continue?')) return;
-    const r = await fetch('/api/cleanup-fragments', { method: 'POST' });
+    const r = await fetch('/api/cleanup-fragments', { method: 'POST', headers: JSON_HEADERS });
     const d = await r.json();
     alert(`Removed ${d.removed.length} fragment file(s).`);
     loadVideos();
@@ -692,17 +695,17 @@
 
   async function removeJob(id, cancelling) {
     if (cancelling && !confirm('Cancel this download?')) return;
-    await fetch(`/api/queue/${id}`, { method: 'DELETE' });
+    await fetch(`/api/queue/${id}`, { method: 'DELETE', headers: JSON_HEADERS });
     loadQueue();
   }
 
   async function retryJob(id) {
-    await fetch(`/api/queue/${id}/retry`, { method: 'POST' });
+    await fetch(`/api/queue/${id}/retry`, { method: 'POST', headers: JSON_HEADERS });
     loadQueue();
   }
 
   async function clearFinished() {
-    await fetch('/api/queue/clear', { method: 'POST' });
+    await fetch('/api/queue/clear', { method: 'POST', headers: JSON_HEADERS });
     loadQueue();
   }
 
@@ -732,7 +735,7 @@
   }
 
   function escHtml(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
 
   loadConfig();
