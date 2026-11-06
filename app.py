@@ -1,8 +1,10 @@
 import os
 import json
 import time
+import re
 import uuid
 import threading
+import multiprocessing
 from flask import Flask, render_template, request, jsonify
 import yt_dlp
 
@@ -133,6 +135,7 @@ def list_videos():
             "expires_in_days": round(expires_in, 1),
             "size_mb": round(os.path.getsize(filepath) / 1024 / 1024, 1),
             "has_comments": os.path.exists(sidecar_paths(filename)[0]),
+            "has_url": bool(entry.get("url")),
         })
     result.sort(key=lambda x: x["downloaded_at"], reverse=True)
     return jsonify(result)
@@ -192,16 +195,20 @@ def load_queue():
         jobs_cond.notify_all()
 
 
-def new_job(url):
+def new_job(url, kind="video", filename="", title="", mode="top"):
+    """kind "video" downloads url; kind "comments" only fetches comments for
+    an already-downloaded file."""
     return {
         "id": uuid.uuid4().hex[:12],
+        "kind": kind,
+        "mode": mode,
         "url": url,
         "status": "queued",
-        "title": "",
+        "title": title,
         "thumbnail": "",
         "progress": 0,
         "msg": "Waiting...",
-        "filename": "",
+        "filename": filename,
         "added_at": time.time(),
         "finished_at": 0,
     }
@@ -300,16 +307,11 @@ def run_job(job):
                 "url": url,
             }
             save_db(db)
-        msg = "Download complete"
+        finish_job(job, "done", "Download complete", progress=100, filename=filename)
+        # Comments get their own queue item (and worker), so the next video
+        # starts right away instead of waiting for them
         if load_config().get("comments_enabled", True):
-            update_job(job, progress=100, filename=filename, msg="Fetching comments...")
-            try:
-                n = save_comments(url, final_path, result_info.get("comment_count"))
-                msg = f"Download complete, {n} comments saved"
-            except Exception as e:
-                # The video is what matters; a comments failure doesn't fail the job
-                msg = f"Download complete (comments failed: {str(e).replace('ERROR: ', '', 1)})"
-        finish_job(job, "done", msg, progress=100, filename=filename)
+            queue_comments([filename], total_on_site=result_info.get("comment_count"))
 
     except Exception as e:
         # yt-dlp wraps exceptions raised from hooks, so check the flag too
@@ -345,21 +347,53 @@ def remove_sidecars(filename):
             os.remove(path)
 
 
-def save_comments(url, video_path, total_on_site=None):
-    """Fetch comments for url and write them beside video_path. Returns the count."""
-    limit = int(load_config().get("comments_max", 500))
+class _CommentProgress:
+    """yt-dlp logger that turns "Downloading comment API JSON page 3 (60/~4100)"
+    lines into progress(done, estimated_total) calls."""
+    PATTERN = re.compile(r"\((\d+)/~?(\d+)\)")
+
+    def __init__(self, progress):
+        self.progress = progress
+        self.estimate = None
+
+    def debug(self, msg):
+        m = self.PATTERN.search(msg) if "comment" in msg.lower() else None
+        if m:
+            done, self.estimate = int(m.group(1)), int(m.group(2))
+            if self.progress:
+                self.progress(done, self.estimate)
+
+    def info(self, msg):
+        self.debug(msg)
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        pass
+
+
+def save_comments(url, video_path, total_on_site=None, full=False, limit=500, progress=None):
+    """Fetch comments for url and write them beside video_path. Returns the count.
+    full=True fetches every comment and reply instead of the top `limit`."""
+    if full:
+        # max-comments, max-parents, max-replies, max-replies-per-thread
+        max_comments = ["all", "all", "all", "all"]
+    else:
+        # Up to `limit` in total, in YouTube's "top" order. Replies are capped
+        # at a quarter of the budget (and 3 per thread) so most of it goes to
+        # distinct top-level comments.
+        max_comments = [str(limit), "all", str(limit // 4), "3"]
+    logger = _CommentProgress(progress)
     opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
         "getcomments": True,
-        # max-comments, max-parents, max-replies, max-replies-per-thread:
-        # up to `limit` in total, in YouTube's "top" order. Replies are capped
-        # at a quarter of the budget (and 3 per thread) so most of it goes to
-        # distinct top-level comments.
+        "logger": logger,
         "extractor_args": {"youtube": {
-            "max_comments": [str(limit), "all", str(limit // 4), "3"],
+            "max_comments": max_comments,
             "comment_sort": ["top"],
         }},
     }
@@ -398,9 +432,10 @@ def save_comments(url, video_path, total_on_site=None):
         "channel": info.get("channel") or info.get("uploader"),
         "fetched_at": time.time(),
         "sort": "top",
+        "mode": "all" if full else "top",
         # With getcomments on, yt-dlp reports the fetched count here, so the
         # real total comes from the download's own info instead
-        "total_on_site": total_on_site,
+        "total_on_site": total_on_site or logger.estimate,
         "saved": len(info.get("comments") or []),
         "comments": threads,
     }
@@ -412,17 +447,118 @@ def save_comments(url, video_path, total_on_site=None):
     return data["saved"]
 
 
-def queue_worker():
+def _comments_child(conn, url, path, total_on_site, full, limit):
+    """Runs in a separate process (see fetch_comments_for) and reports back."""
+    try:
+        n = save_comments(url, path, total_on_site, full, limit,
+                          progress=lambda done, est: conn.send(("progress", done, est)))
+        conn.send(("done", n))
+    except Exception as e:
+        conn.send(("error", str(e).replace("ERROR: ", "", 1)))
+    finally:
+        conn.close()
+
+
+def fetch_comments_for(job, url, path, total_on_site=None, full=False):
+    """Fetch comments in a child process so Cancel can stop it: yt-dlp has no
+    way to interrupt a comment fetch, and an "all comments" fetch on a big
+    video can run for a long time. Returns the count saved; raises
+    DownloadCancelled or RuntimeError."""
+    limit = int(load_config().get("comments_max", 500))
+    parent_conn, child_conn = multiprocessing.Pipe(duplex=False)
+    proc = multiprocessing.get_context("spawn").Process(
+        target=_comments_child, args=(child_conn, url, path, total_on_site, full, limit), daemon=True)
+    proc.start()
+    child_conn.close()
+    label = "all comments" if full else "comments"
+    update_job(job, msg=f"Fetching {label}...")
+    try:
+        while True:
+            if job.get("_cancel"):
+                proc.terminate()
+                proc.join()
+                tmp = sidecar_paths(os.path.basename(path))[0] + ".tmp"
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                raise DownloadCancelled()
+            if parent_conn.poll(0.5):
+                try:
+                    msg = parent_conn.recv()
+                except EOFError:
+                    raise RuntimeError("comment fetcher stopped unexpectedly")
+                if msg[0] == "progress":
+                    done, est = msg[1], msg[2]
+                    target = est if full else min(limit, est or limit)
+                    pct = min(99, int(done * 100 / target)) if target else 0
+                    update_job(job, progress=pct, msg=f"Fetching {label}: {done:,} of ~{target:,}")
+                elif msg[0] == "done":
+                    return msg[1]
+                else:
+                    raise RuntimeError(msg[1])
+            elif not proc.is_alive() and not parent_conn.poll():
+                raise RuntimeError("comment fetcher stopped unexpectedly")
+    finally:
+        proc.join(timeout=5)
+        parent_conn.close()
+
+
+def run_comments_job(job):
+    filename = job["filename"]
+    path = os.path.join(DOWNLOAD_DIR, filename)
+    if not os.path.exists(path):
+        finish_job(job, "error", "The video file no longer exists.")
+        return
+    full = job.get("mode") == "all"
+    try:
+        n = fetch_comments_for(job, job["url"], path, job.get("total_on_site"), full=full)
+        finish_job(job, "done", f"{n:,} comments saved" + (" (all)" if full else ""), progress=100)
+    except DownloadCancelled:
+        finish_job(job, "cancelled", "Cancelled; any earlier comments file was kept")
+    except Exception as e:
+        finish_job(job, "error", f"Comments failed: {e}")
+
+
+def queue_comments(filenames, mode="top", total_on_site=None):
+    """Queue comment fetches for downloaded files that have a source URL,
+    skipping any already waiting. Returns the new jobs."""
+    with db_lock:
+        db = load_db()
+    added = []
+    with jobs_cond:
+        pending = {j.get("filename") for j in jobs
+                   if j.get("kind") == "comments" and j["status"] in ACTIVE_STATES}
+        for filename in filenames:
+            entry = db.get(filename) or {}
+            if not entry.get("url") or filename in pending:
+                continue
+            job = new_job(entry["url"], "comments", filename, entry.get("title", filename), mode)
+            if total_on_site:
+                job["total_on_site"] = total_on_site
+            jobs.append(job)
+            added.append(job)
+        if added:
+            save_queue()
+            jobs_cond.notify_all()
+    return added
+
+
+def queue_worker(kind):
+    """One worker per kind: videos download one at a time, and comment fetches
+    (which can be slow) run alongside without holding videos up."""
     while True:
         with jobs_cond:
             while True:
-                job = next((j for j in jobs if j["status"] == "queued"), None)
+                job = next((j for j in jobs if j["status"] == "queued"
+                            and j.get("kind", "video") == kind), None)
                 if job:
                     break
                 jobs_cond.wait()
             job.update(status="downloading", progress=0, msg="Starting...")
             save_queue()
-        run_job(job)
+        if job.get("kind") == "comments":
+            run_comments_job(job)
+        else:
+            run_job(job)
 
 
 def find_job(job_id):
@@ -475,7 +611,8 @@ def retry_job(job_id):
         if not job or job["status"] in ACTIVE_STATES:
             return jsonify({"error": "Not retryable"}), 400
         jobs.remove(job)
-        fresh = new_job(job["url"])
+        fresh = new_job(job["url"], job.get("kind", "video"), job.get("filename", ""),
+                        job.get("title", ""), job.get("mode", "top"))
         jobs.append(fresh)
         save_queue()
         jobs_cond.notify_all()
@@ -488,6 +625,29 @@ def clear_finished():
         jobs[:] = [j for j in jobs if j["status"] in ACTIVE_STATES]
         save_queue()
     return jsonify({"ok": True})
+
+
+@app.route("/api/comments", methods=["POST"])
+def fetch_comments():
+    """{"filename": "..."} fetches (or refreshes) one video's top comments;
+    add "mode": "all" for every comment and reply. {"missing": true} queues
+    every video that has none yet (top comments)."""
+    data = request.json or {}
+    if data.get("missing"):
+        with db_lock:
+            names = list(load_db().keys())
+        names = [n for n in names
+                 if os.path.exists(os.path.join(DOWNLOAD_DIR, n))
+                 and not os.path.exists(sidecar_paths(n)[0])]
+    elif data.get("filename"):
+        names = [data["filename"]]
+        mode = "all" if data.get("mode") == "all" else "top"
+    else:
+        return jsonify({"error": "Give a filename or missing: true"}), 400
+    added = queue_comments(names, mode if data.get("filename") else "top")
+    if data.get("filename") and not added:
+        return jsonify({"error": "No source URL for this video, or it's already queued"}), 400
+    return jsonify({"queued": len(added)})
 
 
 @app.route("/api/delete/<path:filename>", methods=["DELETE"])
@@ -566,7 +726,8 @@ def cleanup_fragments():
 if __name__ == "__main__":
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     load_queue()
-    threading.Thread(target=queue_worker, daemon=True).start()
+    threading.Thread(target=queue_worker, args=("video",), daemon=True).start()
+    threading.Thread(target=queue_worker, args=("comments",), daemon=True).start()
     cleanup_thread = threading.Thread(target=run_cleanup, daemon=True)
     cleanup_thread.start()
     app.run(host="0.0.0.0", port=5000, debug=False)

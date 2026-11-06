@@ -125,9 +125,22 @@ Settings panel → **Comments**:
 | Save comments | On | Fetch comments after each download |
 | Max comments per video | 500 | Total saved, in YouTube's "top" order; replies use at most a quarter of this (3 per thread) |
 
-Comments are fetched after the video finishes, so they never slow the video
-down. If fetching them fails, the download still counts as done and the queue
-shows why.
+Comments are fetched as their own queue item after the video finishes, on a
+separate worker, so the next video never waits for them. If fetching fails,
+the video is unaffected and the queue shows why.
+
+On each video in the list:
+
+- **Fetch comments** / **Refresh comments**: top comments, up to the limit above.
+  Also works for videos downloaded before comments existed.
+- **All comments**: every comment and every reply. YouTube serves roughly 25
+  comments a second, so 10k comments take about 6 minutes and a video with
+  millions would take days. Progress shows in the queue, **Cancel** stops it,
+  and the existing comments file is kept unless the fetch finishes.
+
+Settings → **Fetch Missing Comments** queues top comments for every video that
+doesn't have any yet. Videos added by **Rescan Folder** have no source URL, so
+they're skipped.
 
 File format (for other tools, such as Vidscribe):
 
@@ -140,6 +153,7 @@ File format (for other tools, such as Vidscribe):
   "channel": "...",
   "fetched_at": 1794008253.97,
   "sort": "top",
+  "mode": "top",
   "total_on_site": 12345,
   "saved": 500,
   "comments": [
@@ -155,6 +169,8 @@ File format (for other tools, such as Vidscribe):
 }
 ```
 
+`mode` is `"top"` (limited) or `"all"` (every comment and reply).
+`total_on_site` is the video's comment count on YouTube (may be `null`).
 Replies to replies are flattened into their thread's `replies`. `likes` is
 YouTube's rounded count (e.g. 4.8M becomes 4800000).
 

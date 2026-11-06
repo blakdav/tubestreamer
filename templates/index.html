@@ -132,6 +132,24 @@
 
     .btn-danger:hover { background: var(--accent2); color: #fff; opacity: 1; }
 
+    .btn-ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      font-size: 0.72rem;
+      padding: 6px 12px;
+    }
+
+    .btn-ghost:hover { border-color: var(--accent); color: var(--accent); opacity: 1; }
+
+    .video-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+    @media (max-width: 640px) {
+      .video-card { flex-wrap: wrap; }
+      .video-info { flex-basis: calc(100% - 96px); }
+      .video-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+    }
+
     /* --- Status bar --- */
     #status {
       margin-top: 14px;
@@ -500,6 +518,8 @@
         <input type="number" id="input-comments-max" min="10" max="10000" step="50" value="500" onchange="saveConfig()" />
       </div>
 
+      <button class="btn btn-ghost" style="width:100%; margin-bottom:20px;" onclick="fetchMissingComments()">Fetch Missing Comments</button>
+
       <button class="btn save-btn" onclick="saveConfig()">Save Settings</button>
       <div class="save-indicator" id="save-indicator"></div>
 
@@ -600,9 +620,35 @@
               ${v.has_comments ? '<span title="Comments saved">💬 comments</span>' : ''}
             </div>
           </div>
-          <button class="btn btn-danger" data-filename="${escHtml(v.filename)}" onclick="deleteVideo(this.dataset.filename)">Delete</button>
+          <div class="video-actions">
+            ${v.has_url ? `
+              <button class="btn btn-ghost" data-filename="${escHtml(v.filename)}" onclick="fetchComments(this.dataset.filename)" title="Top comments, up to the limit in settings">${v.has_comments ? 'Refresh comments' : 'Fetch comments'}</button>
+              <button class="btn btn-ghost" data-filename="${escHtml(v.filename)}" onclick="fetchComments(this.dataset.filename, 'all')" title="Every comment and every reply (can take a long time on big videos)">All comments</button>` : ''}
+            <button class="btn btn-danger" data-filename="${escHtml(v.filename)}" onclick="deleteVideo(this.dataset.filename)">Delete</button>
+          </div>
         </div>`;
     }).join('');
+  }
+
+  async function fetchComments(filename, mode = 'top') {
+    if (mode === 'all' && !confirm('Fetch every comment and reply? On a popular video this can take a long time. You can cancel it from the queue, and the current comments file is kept until it finishes.')) return;
+    const r = await fetch('/api/comments', {
+      method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ filename, mode })
+    });
+    const d = await r.json();
+    if (!r.ok) alert(d.error || 'Could not queue comments');
+    loadQueue();
+  }
+
+  async function fetchMissingComments() {
+    const r = await fetch('/api/comments', {
+      method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ missing: true })
+    });
+    const d = await r.json();
+    alert(d.queued
+      ? `Queued comment fetches for ${d.queued} video(s).`
+      : 'Nothing to fetch: every video with a known source already has comments.');
+    loadQueue();
   }
 
   async function deleteVideo(filename) {
@@ -695,7 +741,8 @@
     document.getElementById('clear-btn').hidden = finished.length === 0;
 
     document.getElementById('queue-list').innerHTML = [...active, ...finished].map(j => {
-      const title = j.title || j.url;
+      const prefix = j.kind === 'comments' ? (j.mode === 'all' ? '💬 All comments: ' : '💬 Comments: ') : '';
+      const title = prefix + (j.title || j.url);
       const actions = [];
       if (j.status === 'error' || j.status === 'cancelled')
         actions.push(`<button class="btn" onclick="retryJob('${j.id}')">Retry</button>`);
