@@ -21,7 +21,9 @@ db_lock = threading.Lock()
 
 DEFAULT_CONFIG = {
     "auto_delete_days": 30,
-    "auto_delete_enabled": True
+    "auto_delete_enabled": True,
+    "comments_enabled": True,
+    "comments_max": 500,
 }
 
 def load_db():
@@ -37,10 +39,11 @@ def save_db(db):
     os.replace(tmp, DB_FILE)
 
 def load_config():
+    config = DEFAULT_CONFIG.copy()
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return DEFAULT_CONFIG.copy()
+            config.update(json.load(f))
+    return config
 
 def save_config(config):
     with open(CONFIG_FILE, "w") as f:
@@ -66,6 +69,7 @@ def cleanup_expired():
                 filepath = os.path.join(DOWNLOAD_DIR, filename)
                 if os.path.exists(filepath):
                     os.remove(filepath)
+                remove_sidecars(filename)
                 to_delete.append(filename)
         for filename in to_delete:
             del db[filename]
@@ -99,6 +103,10 @@ def update_config():
         config["auto_delete_days"] = max(1, int(data["auto_delete_days"]))
     if "auto_delete_enabled" in data:
         config["auto_delete_enabled"] = bool(data["auto_delete_enabled"])
+    if "comments_enabled" in data:
+        config["comments_enabled"] = bool(data["comments_enabled"])
+    if "comments_max" in data:
+        config["comments_max"] = min(10000, max(10, int(data["comments_max"])))
     save_config(config)
     return jsonify(config)
 
@@ -123,7 +131,8 @@ def list_videos():
             "downloaded_at": entry.get("downloaded_at", 0),
             "age_days": round(age_days, 1),
             "expires_in_days": round(expires_in, 1),
-            "size_mb": round(os.path.getsize(filepath) / 1024 / 1024, 1)
+            "size_mb": round(os.path.getsize(filepath) / 1024 / 1024, 1),
+            "has_comments": os.path.exists(sidecar_paths(filename)[0]),
         })
     result.sort(key=lambda x: x["downloaded_at"], reverse=True)
     return jsonify(result)
@@ -291,7 +300,16 @@ def run_job(job):
                 "url": url,
             }
             save_db(db)
-        finish_job(job, "done", "Download complete", progress=100, filename=filename)
+        msg = "Download complete"
+        if load_config().get("comments_enabled", True):
+            update_job(job, progress=100, filename=filename, msg="Fetching comments...")
+            try:
+                n = save_comments(url, final_path, result_info.get("comment_count"))
+                msg = f"Download complete, {n} comments saved"
+            except Exception as e:
+                # The video is what matters; a comments failure doesn't fail the job
+                msg = f"Download complete (comments failed: {str(e).replace('ERROR: ', '', 1)})"
+        finish_job(job, "done", msg, progress=100, filename=filename)
 
     except Exception as e:
         # yt-dlp wraps exceptions raised from hooks, so check the flag too
@@ -301,6 +319,97 @@ def run_job(job):
         else:
             msg = str(e).replace("ERROR: ", "", 1)
             finish_job(job, "error", msg)
+
+
+# ---------------------------------------------------------------------------
+# Comments
+#
+# After a download, the video's top comments are saved next to it as
+# "<video name>.comments.json" (e.g. "2026-11-04 Title.comments.json"), for
+# reading and for other tools (Vidscribe) to pick up. Fetched in a second pass
+# so a slow comment fetch never delays the video itself. Replies are nested
+# under their parent comment.
+# ---------------------------------------------------------------------------
+
+COMMENTS_SUFFIX = ".comments.json"
+
+
+def sidecar_paths(filename):
+    base = os.path.splitext(filename)[0]
+    return [os.path.join(DOWNLOAD_DIR, base + COMMENTS_SUFFIX)]
+
+
+def remove_sidecars(filename):
+    for path in sidecar_paths(filename):
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def save_comments(url, video_path, total_on_site=None):
+    """Fetch comments for url and write them beside video_path. Returns the count."""
+    limit = int(load_config().get("comments_max", 500))
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+        "getcomments": True,
+        # max-comments, max-parents, max-replies, max-replies-per-thread:
+        # up to `limit` in total, in YouTube's "top" order. Replies are capped
+        # at a quarter of the budget (and 3 per thread) so most of it goes to
+        # distinct top-level comments.
+        "extractor_args": {"youtube": {
+            "max_comments": [str(limit), "all", str(limit // 4), "3"],
+            "comment_sort": ["top"],
+        }},
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    # Replies can be nested (a reply to a reply); all of them go under the
+    # top-level comment that started the thread.
+    threads, thread_of = [], {}
+    for c in info.get("comments") or []:
+        item = {
+            "id": c.get("id"),
+            "author": c.get("author"),
+            "text": c.get("text") or "",
+            "likes": c.get("like_count") or 0,
+            "timestamp": c.get("timestamp"),
+            "is_uploader": bool(c.get("author_is_uploader")),
+            "is_pinned": bool(c.get("is_pinned")),
+            "replies": [],
+        }
+        parent = c.get("parent", "root")
+        if parent in thread_of:
+            item.pop("replies")
+            thread = thread_of[parent]
+            thread["replies"].append(item)
+        else:
+            thread = item
+            threads.append(item)
+        thread_of[item["id"]] = thread
+
+    data = {
+        "source": "youtube",
+        "url": info.get("webpage_url") or url,
+        "video_id": info.get("id"),
+        "title": info.get("title"),
+        "channel": info.get("channel") or info.get("uploader"),
+        "fetched_at": time.time(),
+        "sort": "top",
+        # With getcomments on, yt-dlp reports the fetched count here, so the
+        # real total comes from the download's own info instead
+        "total_on_site": total_on_site,
+        "saved": len(info.get("comments") or []),
+        "comments": threads,
+    }
+    path = sidecar_paths(os.path.basename(video_path))[0]
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+    return data["saved"]
 
 
 def queue_worker():
@@ -394,6 +503,7 @@ def delete_video(filename):
             save_db(db)
     if os.path.exists(filepath):
         os.remove(filepath)
+    remove_sidecars(filename)
     return jsonify({"ok": True})
 
 @app.route("/api/cleanup", methods=["POST"])

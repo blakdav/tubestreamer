@@ -483,6 +483,23 @@
         <input type="number" id="input-days" min="1" max="365" value="30" onchange="saveConfig()" />
       </div>
 
+      <hr class="divider" />
+
+      <h2>Comments</h2>
+
+      <div class="toggle-row">
+        <span class="toggle-label">Save comments</span>
+        <label class="toggle">
+          <input type="checkbox" id="toggle-comments" onchange="saveConfig()" />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <div class="setting-row">
+        <label>Max comments per video</label>
+        <input type="number" id="input-comments-max" min="10" max="10000" step="50" value="500" onchange="saveConfig()" />
+      </div>
+
       <button class="btn save-btn" onclick="saveConfig()">Save Settings</button>
       <div class="save-indicator" id="save-indicator"></div>
 
@@ -518,6 +535,8 @@
     const c = await r.json();
     document.getElementById('input-days').value = c.auto_delete_days;
     document.getElementById('toggle-enabled').checked = c.auto_delete_enabled;
+    document.getElementById('toggle-comments').checked = c.comments_enabled;
+    document.getElementById('input-comments-max').value = c.comments_max;
   }
 
   async function saveConfig() {
@@ -526,7 +545,12 @@
     await fetch('/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auto_delete_days: days, auto_delete_enabled: enabled })
+      body: JSON.stringify({
+        auto_delete_days: days,
+        auto_delete_enabled: enabled,
+        comments_enabled: document.getElementById('toggle-comments').checked,
+        comments_max: parseInt(document.getElementById('input-comments-max').value)
+      })
     });
     const ind = document.getElementById('save-indicator');
     ind.textContent = 'Saved.';
@@ -573,6 +597,7 @@
               <span>${v.size_mb} MB</span>
               <span>${v.age_days}d old</span>
               <span class="${expiryClass}">${expiryText}</span>
+              ${v.has_comments ? '<span title="Comments saved">💬 comments</span>' : ''}
             </div>
           </div>
           <button class="btn btn-danger" data-filename="${escHtml(v.filename)}" onclick="deleteVideo(this.dataset.filename)">Delete</button>

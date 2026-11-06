@@ -111,6 +111,55 @@ Videos expiring within 7 days are highlighted in the UI. You can also trigger a 
 
 ---
 
+## Comments
+
+After each download, TubeStreamer saves the video's top comments next to it as
+`<video name>.comments.json`, e.g. `2026-11-04 Some Title.comments.json`. Videos
+with saved comments show 💬 in the list. Deleting a video (by hand or by
+auto-delete) deletes its comments file too.
+
+Settings panel → **Comments**:
+
+| Setting | Default | Description |
+|---|---|---|
+| Save comments | On | Fetch comments after each download |
+| Max comments per video | 500 | Total saved, in YouTube's "top" order; replies use at most a quarter of this (3 per thread) |
+
+Comments are fetched after the video finishes, so they never slow the video
+down. If fetching them fails, the download still counts as done and the queue
+shows why.
+
+File format (for other tools, such as Vidscribe):
+
+```json
+{
+  "source": "youtube",
+  "url": "https://www.youtube.com/watch?v=...",
+  "video_id": "...",
+  "title": "...",
+  "channel": "...",
+  "fetched_at": 1794008253.97,
+  "sort": "top",
+  "total_on_site": 12345,
+  "saved": 500,
+  "comments": [
+    {
+      "id": "...", "author": "@name", "text": "...", "likes": 120,
+      "timestamp": 1793000000, "is_uploader": false, "is_pinned": false,
+      "replies": [
+        { "id": "...", "author": "@other", "text": "...", "likes": 4,
+          "timestamp": 1793000100, "is_uploader": true, "is_pinned": false }
+      ]
+    }
+  ]
+}
+```
+
+Replies to replies are flattened into their thread's `replies`. `likes` is
+YouTube's rounded count (e.g. 4.8M becomes 4800000).
+
+---
+
 ## Plex Integration
 
 Point a Plex library at the same folder you mounted as `/downloads`. Recommended library type: **Movies** or **Other Videos** depending on what you're downloading.
@@ -136,7 +185,7 @@ Generated at runtime in your downloads folder:
 ```
 /your/downloads/folder/
 ├── .ytdl_db.json           # Download history + timestamps
-├── .ytdl_config.json       # Auto-delete settings
+├── .ytdl_config.json       # Auto-delete and comment settings
 └── .ytdl_queue.json        # Download queue (pending + recent)
 ```
 
