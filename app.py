@@ -627,6 +627,40 @@ def clear_finished():
     return jsonify({"ok": True})
 
 
+YOUTUBE_ID = re.compile(r"(?:[?&]v=|youtu\.be/|/shorts/|/live/|/embed/)([A-Za-z0-9_-]{11})")
+
+
+def video_key(url):
+    """Compare links by YouTube video id, so youtu.be, shorts, playlist and
+    tracking-parameter variants of the same video match; other sites by URL."""
+    m = YOUTUBE_ID.search(url or "")
+    return ("yt", m.group(1)) if m else ("url", (url or "").strip())
+
+
+@app.route("/api/status", methods=["GET"])
+def video_status():
+    """Is this video already in TubeStreamer? Used by the browser extension
+    to badge the current tab. ?url=... -> {"state": "downloaded" | "queued" |
+    "downloading" | "error" | "none", "title": ...}"""
+    key = video_key(request.args.get("url", ""))
+    failed = None
+    with jobs_cond:
+        for j in reversed(jobs):
+            if j.get("kind", "video") != "video" or video_key(j["url"]) != key:
+                continue
+            if j["status"] in ACTIVE_STATES:
+                return jsonify({"state": j["status"], "title": j.get("title") or ""})
+            if j["status"] == "error" and not failed:
+                failed = {"state": "error", "title": j.get("title") or "", "msg": j.get("msg", "")}
+    with db_lock:
+        db = load_db()
+    for filename, entry in db.items():
+        if entry.get("url") and video_key(entry["url"]) == key \
+                and os.path.exists(os.path.join(DOWNLOAD_DIR, filename)):
+            return jsonify({"state": "downloaded", "title": entry.get("title", ""), "filename": filename})
+    return jsonify(failed or {"state": "none"})
+
+
 @app.route("/api/comments", methods=["POST"])
 def fetch_comments():
     """{"filename": "..."} fetches (or refreshes) one video's top comments;

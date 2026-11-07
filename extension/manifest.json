@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Send to TubeStreamer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "One click to queue the current video (or any link) on your TubeStreamer server.",
   "icons": {
     "16": "icons/icon16.png",
@@ -19,15 +19,26 @@
   "background": {
     "service_worker": "background.js"
   },
-  "permissions": ["activeTab", "contextMenus", "storage"],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "contextMenus",
+    "notifications",
+    "storage"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
   "options_ui": {
     "page": "options.html",
     "open_in_tab": false
   },
   "commands": {
     "_execute_action": {
-      "suggested_key": { "default": "Alt+Shift+Y" },
+      "suggested_key": {
+        "default": "Alt+Shift+Y"
+      },
       "description": "Send the current tab to TubeStreamer"
     }
   }

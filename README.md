@@ -69,15 +69,18 @@ The `extension/` folder has a small extension that queues videos without copy-pa
 - **Toolbar button** (or **Alt+Shift+Y**): sends the current tab.
 - **Right-click a link → Send link to TubeStreamer**: queue videos straight from a feed or playlist without opening them.
 - **Right-click a page → Send this page to TubeStreamer**.
-- The icon shows **✓** when the link is queued, or **!** if it failed (hover the icon for the reason).
+- The icon shows the state of the video **in the current tab**: **✓** already downloaded,
+  **↓** queued or downloading, **!** the last attempt failed, nothing if it isn't in
+  TubeStreamer. Hover the icon for the title or error. It updates as you switch tabs and videos.
+- Desktop notifications when you send something, and again when it finishes downloading or fails.
 
 Install:
 
 1. Open `brave://extensions` (or `chrome://extensions`) and turn on **Developer mode**.
 2. Click **Load unpacked** and pick the `extension/` folder.
-3. The options page opens: enter the address you use for TubeStreamer (e.g. `https://tubestreamer.example.lan`), click **Save & test**, and allow access to that site when asked.
+3. The options page opens: enter the address you use for TubeStreamer (e.g. `https://tubestreamer.example.lan`), click **Save & test**, and allow access when asked. Brave asks for that site and YouTube; YouTube access lets the icon check the video in the current tab, and the extension can't see any other sites.
 
-To update it after a `git pull`, click the reload icon on the extension's card.
+To update it after a `git pull`, click the reload icon on the extension's card. If an update needs new access, the options page opens: click **Save & test** again.
 
 ### iPhone (Shortcuts share sheet)
 

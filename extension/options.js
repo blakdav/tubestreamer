@@ -28,8 +28,12 @@ async function save() {
   input.value = server;
 
   // Must be called directly from the click handler (user gesture)
-  const granted = await chrome.permissions.request({ origins: [new URL(server).origin + '/*'] });
-  if (!granted) return show('err', 'Access to that site was not allowed, so the extension can\'t reach it.');
+  // The server, plus YouTube so the icon can show whether the video in a tab
+  // is already in TubeStreamer (it reads YouTube tab addresses, nothing else).
+  const granted = await chrome.permissions.request({
+    origins: [new URL(server).origin + '/*', 'https://www.youtube.com/*', 'https://m.youtube.com/*']
+  });
+  if (!granted) return show('err', 'Access was not allowed, so the extension can\'t reach TubeStreamer.');
 
   await chrome.storage.local.set({ server });
   show('', 'Saved. Testing connection...');
