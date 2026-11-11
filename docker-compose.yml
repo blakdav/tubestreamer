@@ -9,6 +9,14 @@ services:
       - /mnt/user/media/youtube:/downloads
     environment:
       - DOWNLOAD_DIR=/downloads
+      # Optional: a local Ollama server (as seen from this container) to sort
+      # videos the folder rules can't decide. Leave out for rules only.
+      # - OLLAMA_URL=http://your-ollama-host:11434
+      # - OLLAMA_MODEL=qwen3:4b
+    # Lets OLLAMA_URL=http://host.docker.internal:11434 reach an Ollama on
+    # this same host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # networks:
     #   - arr-stack
     #

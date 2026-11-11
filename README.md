@@ -101,6 +101,55 @@ The API accepts several links in one go too: `{"urls": ["...", "..."]}`.
 
 ---
 
+## Sorting into folders
+
+Each download is filed into a category folder (`/downloads/<Category>/`) before it
+starts, so a media server can give each folder its own library. Categories are yours:
+set them under **Sorting rules** in the UI (saved in `.ytdl_config.json`), and any
+subfolder you create in the downloads folder becomes one too. Nothing about them is
+in the code or the image.
+
+A video goes through these checks and stops at the first that decides:
+
+1. **Learned channel**: you moved a video from this channel before (Move to… on a
+   video), so its later uploads follow. Shown under *Learned channels*; "forget" undoes it.
+2. **Listed channel**: the channel's name, @handle or ID is in a category's channel list.
+   The most reliable rule, since clickbait titles ("THIS IS HUGE") say nothing.
+3. **Language**: the video's language matches a category's languages. `zh`, `ja`, `ko`
+   and `ru` also match that script in the title (e.g. Chinese characters).
+4. **Keywords**, scored by where they appear: title and tags 3 points, channel name 2,
+   description, YouTube category and the first 3 minutes of captions 1. A category needs
+   3 points and a clear lead, so one spoken "wow" doesn't sort a video.
+5. **Local AI** (optional, Ollama): gets the title, channel, tags, description, captions
+   and your categories with their descriptions, and must answer with one of the folder
+   names. Runs only when the steps above didn't decide.
+6. The **fallback folder** (`General` unless you rename it).
+
+Each video shows its folder, and hovering it shows why it landed there. The queue shows
+the same. You can also pick a folder in the dropdown next to **Add to Queue** to skip
+the rules for those links. **Sort unsorted videos** files everything still sitting in
+the main folder (from before sorting, or added by hand) using the same rules. Moving a
+video takes its comments and any other files named after it along.
+
+The API takes an optional folder too: `{"url": "...", "category": "Warcraft"}`.
+
+### Local AI
+
+Set `OLLAMA_URL` (as seen from the container) and optionally `OLLAMA_MODEL` in
+`docker-compose.yml`. The default model is `qwen3:4b` (about 3 GB): picking one label
+from a short list doesn't need a big model. It's unloaded right after each answer
+(`keep_alive: 0`), so it doesn't hold GPU memory another app (e.g. a transcriber)
+needs. If Ollama can't be reached, the video goes to the fallback folder and the reason
+says why.
+
+### Other apps
+
+Files move between folders, so tools that track videos by path lose track unless they
+re-link. Vidscribe re-attaches a transcript when its file turns up under the same name
+in another folder.
+
+---
+
 ## Auto-Delete
 
 Auto-delete runs in the background every hour. Settings are saved to `.ytdl_config.json` in your downloads folder and persist across container restarts.
@@ -179,9 +228,9 @@ YouTube's rounded count (e.g. 4.8M becomes 4800000).
 
 ---
 
-## Plex Integration
+## Plex / Jellyfin Integration
 
-Point a Plex library at the same folder you mounted as `/downloads`. Recommended library type: **Movies** or **Other Videos** depending on what you're downloading.
+Point a library at the same folder you mounted as `/downloads`, or, with sorting on, one library per category folder (e.g. `/youtube/Warcraft`). Recommended library type: **Movies** or **Other Videos** (Plex), **Home Videos and Photos** or **Mixed** (Jellyfin).
 
 Plex will pick up new files automatically if you have library auto-scan enabled, or you can trigger a manual scan after downloading.
 
@@ -193,6 +242,7 @@ Plex will pick up new files automatically if you have library auto-scan enabled,
 ```
 tubestreamer/
 ├── app.py                  # Flask backend
+├── sorter.py               # Picks a category folder for each download
 ├── Dockerfile
 ├── docker-compose.yml
 ├── templates/
@@ -204,8 +254,10 @@ Generated at runtime in your downloads folder:
 ```
 /your/downloads/folder/
 ├── .ytdl_db.json           # Download history + timestamps
-├── .ytdl_config.json       # Auto-delete and comment settings
-└── .ytdl_queue.json        # Download queue (pending + recent)
+├── .ytdl_config.json       # Settings, categories, learned channels
+├── .ytdl_queue.json        # Download queue (pending + recent)
+├── <Category>/             # Sorted videos (and their .comments.json)
+└── General/                # Fallback folder
 ```
 
 ---

@@ -452,6 +452,97 @@
 
     .job-actions { display: flex; gap: 6px; flex-shrink: 0; }
     .job-actions .btn { font-size: 0.68rem; padding: 5px 10px; }
+
+    /* --- Folders / sorting --- */
+    select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: 'Space Mono', monospace;
+      font-size: 0.72rem;
+      padding: 6px 8px;
+      outline: none;
+      max-width: 100%;
+    }
+    select:focus { border-color: var(--accent); }
+    .input-row select { font-size: 0.8rem; padding: 0 10px; }
+
+    .folder-tag {
+      color: var(--accent);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 0 5px;
+    }
+    .folder-tag.none { color: var(--muted); }
+
+    .list-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .list-head .section-label { margin-bottom: 0; }
+
+    #sorting {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 32px;
+    }
+    #sorting summary {
+      cursor: pointer;
+      padding: 14px 18px;
+      font-family: 'Syne', sans-serif;
+      font-weight: 700;
+      font-size: 0.9rem;
+      list-style: none;
+    }
+    #sorting summary::-webkit-details-marker { display: none; }
+    #sorting summary::before { content: '▸ '; color: var(--muted); }
+    #sorting[open] summary::before { content: '▾ '; }
+    #sorting summary .summary-note { font-family: 'Space Mono', monospace; font-weight: 400; font-size: 0.68rem; color: var(--muted); margin-left: 8px; }
+    .sorting-body { padding: 0 18px 18px; }
+    .help { font-size: 0.68rem; color: var(--muted); line-height: 1.6; margin-bottom: 14px; }
+    .help code { color: var(--text); }
+
+    .sort-row { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin-bottom: 16px; }
+    .sort-row .toggle-row { margin-bottom: 0; gap: 10px; }
+    .text-in {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: 'Space Mono', monospace;
+      font-size: 0.75rem;
+      padding: 7px 10px;
+      outline: none;
+      width: 100%;
+    }
+    .text-in:focus { border-color: var(--accent); }
+    .text-in::placeholder { color: #3a3a3a; font-style: italic; }
+
+    .cat-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      margin-bottom: 10px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 12px;
+    }
+    .cat-card .full { grid-column: 1 / -1; }
+    .cat-card label { display: block; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 4px; }
+    .cat-head { display: flex; gap: 8px; align-items: center; }
+    .cat-head .text-in { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 0.85rem; }
+    .cat-head .badge { font-size: 0.62rem; color: var(--muted); white-space: nowrap; }
+    @media (max-width: 640px) { .cat-card { grid-template-columns: 1fr; } }
+
+    .learned { font-size: 0.72rem; }
+    .learned div { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+    .learned span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sort-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px; }
   </style>
 </head>
 <body>
@@ -467,6 +558,9 @@
       <label>YouTube URL — add as many as you like, they download one after another</label>
       <div class="input-row">
         <input type="text" id="url-input" placeholder="https://youtube.com/watch?v=..." />
+        <select id="queue-folder" title="Folder for these links">
+          <option value="">Auto-sort</option>
+        </select>
         <button class="btn" id="dl-btn" onclick="addToQueue()">Add to Queue</button>
       </div>
       <div id="status"></div>
@@ -480,7 +574,50 @@
       <div id="queue-list"></div>
     </div>
 
-    <div class="section-label" id="list-label">Downloaded Videos</div>
+    <details id="sorting">
+      <summary>Sorting rules <span class="summary-note" id="sorting-note"></span></summary>
+      <div class="sorting-body">
+        <p class="help">
+          Each download goes into a folder before it starts. Checks, in order: a channel you've taught it
+          (by moving one of its videos) → a channel listed below → language (e.g. <code>zh</code> also matches
+          Chinese characters in the title) → keywords, scored by where they appear (title and tags count most,
+          the description and first 3 minutes of captions least) → the local AI → the fallback folder.
+          Any subfolder you create in the download folder shows up here too. Channels are the most reliable rule;
+          avoid keywords that are everyday words.
+        </p>
+        <div class="sort-row">
+          <div class="toggle-row">
+            <span class="toggle-label">Sort downloads</span>
+            <label class="toggle"><input type="checkbox" id="toggle-sorting" /><span class="toggle-slider"></span></label>
+          </div>
+          <div class="toggle-row">
+            <span class="toggle-label" id="ai-label">Use AI</span>
+            <label class="toggle"><input type="checkbox" id="toggle-ai" /><span class="toggle-slider"></span></label>
+          </div>
+          <div class="toggle-row" style="flex:1; min-width:200px;">
+            <span class="toggle-label" style="white-space:nowrap">Fallback folder</span>
+            <input class="text-in" id="input-fallback" placeholder="General" title="Fallback folder: where anything that matches nothing goes" />
+          </div>
+        </div>
+        <div id="cat-list"></div>
+        <div class="sort-actions">
+          <button class="btn btn-ghost" onclick="addCategory()">+ Add category</button>
+          <button class="btn" onclick="saveCategories()">Save rules</button>
+          <button class="btn btn-ghost" id="sort-unsorted-btn" onclick="sortUnsorted()">Sort unsorted videos</button>
+          <span class="save-indicator" id="sort-indicator" style="margin:0"></span>
+        </div>
+        <div id="learned-wrap" hidden>
+          <hr class="divider" />
+          <div class="section-label">Learned channels</div>
+          <div class="learned" id="learned-list"></div>
+        </div>
+      </div>
+    </details>
+
+    <div class="list-head">
+      <div class="section-label" id="list-label">Downloaded Videos</div>
+      <select id="folder-filter" onchange="loadVideos()"><option value="*">All folders</option></select>
+    </div>
     <div id="video-list"><div class="empty-state">No videos yet.</div></div>
   </main>
 
@@ -578,9 +715,154 @@
     loadVideos();
   }
 
+  // --- Folders / sorting ---------------------------------------------------
+  let sortInfo = null;      // last /api/categories answer
+  let editingCats = null;   // the category cards being edited
+
+  function folderNames() {
+    if (!sortInfo) return [];
+    return [...sortInfo.categories.map(c => c.name), sortInfo.fallback_category];
+  }
+
+  async function loadCategories(redraw = true) {
+    try {
+      const r = await fetch('/api/categories');
+      sortInfo = await r.json();
+    } catch { return; }
+    const s = sortInfo;
+    const ai = document.getElementById('toggle-ai');
+    ai.disabled = !s.ai_configured;
+    document.getElementById('ai-label').textContent = s.ai_configured ? `Use AI (${s.ai_model})` : 'AI (set OLLAMA_URL)';
+    if (redraw) {  // don't overwrite settings you're in the middle of changing
+      document.getElementById('toggle-sorting').checked = s.sorting_enabled;
+      ai.checked = s.ai_enabled && s.ai_configured;
+      document.getElementById('input-fallback').value = s.fallback_category;
+    }
+    document.getElementById('sorting-note').textContent =
+      s.sorting_enabled ? `${s.categories.length} categories + ${s.fallback_category}` : 'off';
+    const btn = document.getElementById('sort-unsorted-btn');
+    btn.textContent = `Sort unsorted videos (${s.unsorted_count})`;
+    btn.disabled = !s.unsorted_count;
+    if (redraw) { editingCats = s.categories.map(c => ({ ...c })); renderCategories(); }
+    renderLearned();
+    fillFolderSelects();
+  }
+
+  function fillFolderSelects() {
+    const names = folderNames();
+    const q = document.getElementById('queue-folder');
+    const qv = q.value;
+    q.innerHTML = '<option value="">Auto-sort</option>' +
+      names.map(n => `<option value="${escHtml(n)}">→ ${escHtml(n)}</option>`).join('');
+    q.value = names.includes(qv) ? qv : '';
+    const f = document.getElementById('folder-filter');
+    const fv = f.value;
+    f.innerHTML = '<option value="*">All folders</option><option value="">Main folder (unsorted)</option>' +
+      names.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('');
+    f.value = (fv === '*' || fv === '' || names.includes(fv)) ? fv : '*';
+  }
+
+  function renderCategories() {
+    const list = document.getElementById('cat-list');
+    if (!editingCats.length) {
+      list.innerHTML = '<p class="help">No categories yet. Add one, or create a folder in the download folder.</p>';
+      return;
+    }
+    list.innerHTML = editingCats.map((c, i) => `
+      <div class="cat-card">
+        <div class="cat-head full">
+          <input class="text-in" value="${escHtml(c.name)}" placeholder="Folder name" oninput="editCat(${i}, 'name', this.value)" />
+          <span class="badge">${c.from_folder ? 'from folder · ' : ''}${c.count || 0} videos</span>
+          <button class="btn btn-danger" onclick="removeCategory(${i})" title="Remove the rules. The folder and its videos stay; if the folder exists it still shows up here.">✕</button>
+        </div>
+        <div class="full">
+          <label>Description (helps the AI)</label>
+          <input class="text-in" value="${escHtml(c.description || '')}" placeholder="e.g. World of Warcraft news, patches, gameplay" oninput="editCat(${i}, 'description', this.value)" />
+        </div>
+        <div>
+          <label>Channels (name, @handle or ID)</label>
+          <input class="text-in" value="${escHtml((c.channels || []).join(', '))}" placeholder="@SomeChannel, Another Channel" oninput="editCat(${i}, 'channels', this.value)" />
+        </div>
+        <div>
+          <label>Keywords</label>
+          <input class="text-in" value="${escHtml((c.keywords || []).join(', '))}" placeholder="warcraft, azeroth, raid" oninput="editCat(${i}, 'keywords', this.value)" />
+        </div>
+        <div>
+          <label>Languages</label>
+          <input class="text-in" value="${escHtml((c.languages || []).join(', '))}" placeholder="zh" oninput="editCat(${i}, 'languages', this.value)" />
+        </div>
+      </div>`).join('');
+  }
+
+  function editCat(i, key, value) { editingCats[i][key] = value; }
+
+  function addCategory() {
+    editingCats.push({ name: '', description: '', channels: [], keywords: [], languages: [] });
+    renderCategories();
+    const inputs = document.querySelectorAll('#cat-list .cat-head .text-in');
+    inputs[inputs.length - 1].focus();
+  }
+
+  function removeCategory(i) {
+    editingCats.splice(i, 1);
+    renderCategories();
+  }
+
+  async function saveCategories() {
+    const body = {
+      categories: editingCats.filter(c => String(c.name).trim()),
+      fallback_category: document.getElementById('input-fallback').value.trim() || 'General',
+      sorting_enabled: document.getElementById('toggle-sorting').checked,
+    };
+    if (sortInfo && sortInfo.ai_configured) body.ai_enabled = document.getElementById('toggle-ai').checked;
+    const r = await fetch('/api/categories', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) });
+    const d = await r.json();
+    const ind = document.getElementById('sort-indicator');
+    if (!r.ok) { ind.style.color = 'var(--accent2)'; ind.textContent = d.error || 'Not saved'; return; }
+    ind.style.color = ''; ind.textContent = 'Saved.';
+    setTimeout(() => ind.textContent = '', 2000);
+    await loadCategories();
+    loadVideos();
+  }
+
+  function renderLearned() {
+    const learned = sortInfo.learned_channels || [];
+    document.getElementById('learned-wrap').hidden = !learned.length;
+    document.getElementById('learned-list').innerHTML = learned.map(l => `
+      <div>
+        <span title="${escHtml(l.id)}">${escHtml(l.channel || l.id)} → ${escHtml(l.category)}</span>
+        <button class="link-btn" data-id="${escHtml(l.id)}" onclick="forgetChannel(this.dataset.id)">forget</button>
+      </div>`).join('');
+  }
+
+  async function forgetChannel(id) {
+    await fetch('/api/categories', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ forget_channels: [id] }) });
+    loadCategories(false);
+  }
+
+  async function sortUnsorted() {
+    const n = sortInfo ? sortInfo.unsorted_count : 0;
+    if (!confirm(`Sort the ${n} video(s) in the main folder into category folders? Each one's info is fetched again from YouTube; watch progress in the queue.`)) return;
+    const r = await fetch('/api/sort', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ unsorted: true }) });
+    const d = await r.json();
+    if (!r.ok) alert(d.error || 'Could not queue');
+    loadQueue();
+  }
+
+  async function moveVideo(sel) {
+    const filename = sel.dataset.filename;
+    const category = sel.value;
+    if (category === '__keep') return;
+    const r = await fetch('/api/move', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ filename, category }) });
+    const d = await r.json();
+    if (!r.ok) alert(d.error || 'Could not move');
+    loadVideos();
+    loadCategories(false);
+  }
+
   async function loadVideos() {
     const r = await fetch('/api/videos');
-    const videos = await r.json();
+    let videos = await r.json();
     const list = document.getElementById('video-list');
     const label = document.getElementById('list-label');
 
@@ -591,8 +873,13 @@
       ? (totalSize / 1024).toFixed(1) + ' GB'
       : totalSize.toFixed(0) + ' MB';
 
+    const filter = document.getElementById('folder-filter').value;
+    if (filter !== '*') videos = videos.filter(v => v.category === filter);
+    const names = folderNames();
+
     if (videos.length === 0) {
-      list.innerHTML = '<div class="empty-state">No videos downloaded yet.</div>';
+      label.textContent = 'Downloaded Videos';
+      list.innerHTML = `<div class="empty-state">${filter === '*' ? 'No videos downloaded yet.' : 'No videos in this folder.'}</div>`;
       return;
     }
 
@@ -607,12 +894,24 @@
         ? `<img class="video-thumb" src="${escHtml(v.thumbnail)}" alt="" onerror="this.style.display='none'" />`
         : `<div class="video-thumb-placeholder">NO THUMB</div>`;
       const dur = v.duration ? fmtDuration(v.duration) : '—';
+      const why = v.sort_reason ? `Why: ${v.sort_reason}` : '';
+      const folderTag = v.category
+        ? `<span class="folder-tag" title="${escHtml(why)}">${escHtml(v.category)}</span>`
+        : `<span class="folder-tag none" title="Not sorted yet">main folder</span>`;
+      const learnNote = v.can_learn && v.channel ? ` (future videos from ${v.channel} follow)` : '';
+      const moveSel = `
+        <select data-filename="${escHtml(v.filename)}" onchange="moveVideo(this)" title="Move to another folder${escHtml(learnNote)}">
+          <option value="__keep">Move to…</option>
+          ${names.filter(n => n !== v.category).map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('')}
+          ${v.category ? '<option value="">Main folder</option>' : ''}
+        </select>`;
       return `
         <div class="video-card">
           ${thumb}
           <div class="video-info">
             <div class="video-title">${escHtml(v.title)}</div>
             <div class="video-meta">
+              ${folderTag}
               <span>${dur}</span>
               <span>${v.size_mb} MB</span>
               <span>${v.age_days}d old</span>
@@ -621,6 +920,7 @@
             </div>
           </div>
           <div class="video-actions">
+            ${moveSel}
             ${v.has_url ? `
               <button class="btn btn-ghost" data-filename="${escHtml(v.filename)}" onclick="fetchComments(this.dataset.filename)" title="Top comments, up to the limit in settings">${v.has_comments ? 'Refresh comments' : 'Fetch comments'}</button>
               <button class="btn btn-ghost" data-filename="${escHtml(v.filename)}" onclick="fetchComments(this.dataset.filename, 'all')" title="Every comment and every reply (can take a long time on big videos)">All comments</button>` : ''}
@@ -697,7 +997,7 @@
       const r = await fetch('/api/queue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url })
+        body: JSON.stringify({ url, category: document.getElementById('queue-folder').value })
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Failed to queue');
@@ -720,7 +1020,7 @@
 
     // Refresh the video list whenever another download completes
     const doneCount = jobs.filter(j => j.status === 'done').length;
-    if (lastDoneCount !== null && doneCount > lastDoneCount) loadVideos();
+    if (lastDoneCount !== null && doneCount > lastDoneCount) { loadVideos(); loadCategories(false); }
     lastDoneCount = doneCount;
 
     const active = jobs.some(j => j.status === 'queued' || j.status === 'downloading');
@@ -741,7 +1041,10 @@
     document.getElementById('clear-btn').hidden = finished.length === 0;
 
     document.getElementById('queue-list').innerHTML = [...active, ...finished].map(j => {
-      const prefix = j.kind === 'comments' ? (j.mode === 'all' ? '💬 All comments: ' : '💬 Comments: ') : '';
+      const prefix = j.kind === 'comments' ? (j.mode === 'all' ? '💬 All comments: ' : '💬 Comments: ')
+        : j.kind === 'sort' ? '🗂 Sort: ' : '';
+      const where = j.kind !== 'comments' && j.category
+        ? ` · → ${j.category}${j.sort_reason ? ` (${j.sort_reason})` : ''}` : '';
       const title = prefix + (j.title || j.url);
       const actions = [];
       if (j.status === 'error' || j.status === 'cancelled')
@@ -757,7 +1060,7 @@
           <div class="job-icon">${icon}</div>
           <div class="job-info">
             <div class="job-title" title="${escHtml(j.url)}">${escHtml(title)}</div>
-            <div class="job-msg">${escHtml(j.msg || '')}</div>
+            <div class="job-msg" title="${escHtml((j.msg || '') + where)}">${escHtml((j.msg || '') + where)}</div>
           </div>
           <div class="job-actions">${actions.join('')}</div>
           ${bar}
@@ -811,7 +1114,7 @@
   }
 
   loadConfig();
-  loadVideos();
+  loadCategories().then(loadVideos);
   loadQueue();
   setInterval(loadVideos, 30000);
 </script>

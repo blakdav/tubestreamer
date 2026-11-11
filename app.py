@@ -1,12 +1,16 @@
 import os
+import copy
 import json
 import time
 import re
+import shutil
 import uuid
 import threading
 import multiprocessing
 from flask import Flask, render_template, request, jsonify
 import yt_dlp
+
+import sorter
 
 app = Flask(__name__)
 
@@ -20,12 +24,25 @@ QUEUE_HISTORY = 50
 
 # The DB is written by the download worker and by API requests; serialize it.
 db_lock = threading.Lock()
+# Same for the config, which sorting also writes (learned channels).
+config_lock = threading.RLock()
+
+FILENAME_TEMPLATE = "%(upload_date>%Y-%m-%d)s %(title)s.%(ext)s"
+VIDEO_EXTS = (".mp4", ".mkv", ".webm")
 
 DEFAULT_CONFIG = {
     "auto_delete_days": 30,
     "auto_delete_enabled": True,
     "comments_enabled": True,
     "comments_max": 500,
+    # Sorting into category folders (see sorter.py). Categories are set in
+    # the UI; every subfolder of the download folder is one too.
+    "sorting_enabled": True,
+    "ai_enabled": True,
+    "fallback_category": "General",
+    "categories": [],
+    # {channel id: {"category": ..., "channel": name}}, from your moves
+    "learned_channels": {},
 }
 
 def load_db():
@@ -41,15 +58,65 @@ def save_db(db):
     os.replace(tmp, DB_FILE)
 
 def load_config():
-    config = DEFAULT_CONFIG.copy()
+    config = copy.deepcopy(DEFAULT_CONFIG)
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             config.update(json.load(f))
     return config
 
 def save_config(config):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
+    tmp = CONFIG_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, CONFIG_FILE)
+
+# ---------------------------------------------------------------------------
+# Paths
+#
+# Videos sit either directly in DOWNLOAD_DIR (older downloads, or sorting off)
+# or one level down in a category folder. DB keys and API filenames are paths
+# relative to DOWNLOAD_DIR with "/" ("Warcraft/2026-11-10 Title.mp4").
+# ---------------------------------------------------------------------------
+
+def resolve(rel):
+    """Absolute path for a relative video path, or None if it could point
+    anywhere but a file in DOWNLOAD_DIR or one of its category folders."""
+    if not isinstance(rel, str):
+        return None
+    parts = rel.split("/")
+    if not 1 <= len(parts) <= 2 or any(not p or p.startswith(".") or "\\" in p for p in parts):
+        return None
+    return os.path.join(DOWNLOAD_DIR, *parts)
+
+def rel_of(path):
+    return os.path.relpath(path, DOWNLOAD_DIR).replace(os.sep, "/")
+
+def folder_of(rel):
+    return rel.split("/", 1)[0] if "/" in rel else ""
+
+def category_folders():
+    """Subfolders of DOWNLOAD_DIR that are valid category names."""
+    try:
+        return sorted(e.name for e in os.scandir(DOWNLOAD_DIR)
+                      if e.is_dir() and sorter.valid_name(e.name))
+    except OSError:
+        return []
+
+def video_dirs():
+    return [DOWNLOAD_DIR] + [os.path.join(DOWNLOAD_DIR, n) for n in category_folders()]
+
+def all_categories(config):
+    """Configured categories, then folders you made that have no rules yet.
+    The fallback folder isn't one: it's where everything else goes."""
+    cats = sorter.clean_categories(config.get("categories"))
+    fallback = config.get("fallback_category") or "General"
+    cats = [c for c in cats if c["name"] != fallback]
+    have = {c["name"].lower() for c in cats} | {fallback.lower()}
+    for name in category_folders():
+        if name.lower() not in have:
+            cats.append({"name": name, "description": "", "keywords": [], "channels": [],
+                         "languages": [], "from_folder": True})
+    return cats
 
 def run_cleanup():
     """Background thread that checks for expired files every hour."""
@@ -68,7 +135,9 @@ def cleanup_expired():
         to_delete = []
         for filename, entry in db.items():
             if entry.get("downloaded_at", 0) < cutoff:
-                filepath = os.path.join(DOWNLOAD_DIR, filename)
+                filepath = resolve(filename)
+                if not filepath:
+                    continue
                 if os.path.exists(filepath):
                     os.remove(filepath)
                 remove_sidecars(filename)
@@ -120,8 +189,8 @@ def list_videos():
     now = time.time()
     result = []
     for filename, entry in db.items():
-        filepath = os.path.join(DOWNLOAD_DIR, filename)
-        if not os.path.exists(filepath):
+        filepath = resolve(filename)
+        if not filepath or not os.path.exists(filepath):
             continue
         age_days = (now - entry.get("downloaded_at", now)) / 86400
         expires_in = days - age_days
@@ -136,6 +205,10 @@ def list_videos():
             "size_mb": round(os.path.getsize(filepath) / 1024 / 1024, 1),
             "has_comments": os.path.exists(sidecar_paths(filename)[0]),
             "has_url": bool(entry.get("url")),
+            "category": folder_of(filename),
+            "sort_reason": entry.get("sort_reason", ""),
+            "channel": entry.get("channel", ""),
+            "can_learn": bool(entry.get("channel_id")),
         })
     result.sort(key=lambda x: x["downloaded_at"], reverse=True)
     return jsonify(result)
@@ -195,13 +268,17 @@ def load_queue():
         jobs_cond.notify_all()
 
 
-def new_job(url, kind="video", filename="", title="", mode="top"):
+def new_job(url, kind="video", filename="", title="", mode="top", category=""):
     """kind "video" downloads url; kind "comments" only fetches comments for
-    an already-downloaded file."""
+    an already-downloaded file; kind "sort" files an already-downloaded video
+    into a category folder. category: a folder picked when queueing ("" =
+    sort automatically)."""
     return {
         "id": uuid.uuid4().hex[:12],
         "kind": kind,
         "mode": mode,
+        "category": category,
+        "sort_reason": "",
         "url": url,
         "status": "queued",
         "title": title,
@@ -230,12 +307,17 @@ def remove_partials(base):
     """Delete yt-dlp leftovers (.part, .ytdl, per-format fragments) for a cancelled job."""
     if not base:
         return
+    folder = os.path.dirname(base)
     prefix = os.path.basename(base) + "."
-    for name in os.listdir(DOWNLOAD_DIR):
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in names:
         rest = name[len(prefix):]
         if name.startswith(prefix) and (rest.endswith("part") or rest.endswith("ytdl") or rest.startswith("f")):
             try:
-                os.remove(os.path.join(DOWNLOAD_DIR, name))
+                os.remove(os.path.join(folder, name))
             except OSError:
                 pass
 
@@ -259,7 +341,7 @@ def run_job(job):
             update_job(job, msg="Merging...")
 
     ydl_opts = {
-        "outtmpl": os.path.join(DOWNLOAD_DIR, "%(upload_date>%Y-%m-%d)s %(title)s.%(ext)s"),
+        "outtmpl": os.path.join(DOWNLOAD_DIR, FILENAME_TEMPLATE),
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "merge_output_format": "mp4",
         "quiet": True,
@@ -275,8 +357,14 @@ def run_job(job):
             title = info.get("title", "Unknown")
             duration = info.get("duration", 0)
             thumbnail = info.get("thumbnail", "")
+            update_job(job, title=title, thumbnail=thumbnail, msg="Choosing a folder...")
+            category, reason = choose_category(job, info, ydl)
+            target = os.path.join(DOWNLOAD_DIR, category) if category else DOWNLOAD_DIR
+            os.makedirs(target, exist_ok=True)
+            ydl.params["outtmpl"]["default"] = os.path.join(target, FILENAME_TEMPLATE)
             base = os.path.splitext(ydl.prepare_filename(info))[0]
-            update_job(job, title=title, thumbnail=thumbnail, msg="Starting download...")
+            update_job(job, category=category, sort_reason=reason,
+                       msg=f"Starting download into {category or 'the main folder'}...")
             if job.get("_cancel"):
                 raise DownloadCancelled()
 
@@ -296,7 +384,7 @@ def run_job(job):
             finish_job(job, "error", "Download finished but could not locate final file.")
             return
 
-        filename = os.path.basename(final_path)
+        filename = rel_of(final_path)
         with db_lock:
             db = load_db()
             db[filename] = {
@@ -305,6 +393,9 @@ def run_job(job):
                 "duration": duration,
                 "downloaded_at": time.time(),
                 "url": url,
+                "channel": info.get("channel") or info.get("uploader") or "",
+                "channel_id": info.get("channel_id") or info.get("uploader_id") or "",
+                "sort_reason": reason,
             }
             save_db(db)
         finish_job(job, "done", "Download complete", progress=100, filename=filename)
@@ -337,8 +428,9 @@ COMMENTS_SUFFIX = ".comments.json"
 
 
 def sidecar_paths(filename):
+    """filename: the video's path relative to DOWNLOAD_DIR."""
     base = os.path.splitext(filename)[0]
-    return [os.path.join(DOWNLOAD_DIR, base + COMMENTS_SUFFIX)]
+    return [os.path.join(DOWNLOAD_DIR, *(base + COMMENTS_SUFFIX).split("/"))]
 
 
 def remove_sidecars(filename):
@@ -439,7 +531,7 @@ def save_comments(url, video_path, total_on_site=None, full=False, limit=500, pr
         "saved": len(info.get("comments") or []),
         "comments": threads,
     }
-    path = sidecar_paths(os.path.basename(video_path))[0]
+    path = sidecar_paths(rel_of(video_path))[0]
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
@@ -477,7 +569,7 @@ def fetch_comments_for(job, url, path, total_on_site=None, full=False):
             if job.get("_cancel"):
                 proc.terminate()
                 proc.join()
-                tmp = sidecar_paths(os.path.basename(path))[0] + ".tmp"
+                tmp = sidecar_paths(rel_of(path))[0] + ".tmp"
                 if os.path.exists(tmp):
                     os.remove(tmp)
                 raise DownloadCancelled()
@@ -504,8 +596,8 @@ def fetch_comments_for(job, url, path, total_on_site=None, full=False):
 
 def run_comments_job(job):
     filename = job["filename"]
-    path = os.path.join(DOWNLOAD_DIR, filename)
-    if not os.path.exists(path):
+    path = resolve(filename)
+    if not path or not os.path.exists(path):
         finish_job(job, "error", "The video file no longer exists.")
         return
     full = job.get("mode") == "all"
@@ -542,6 +634,215 @@ def queue_comments(filenames, mode="top", total_on_site=None):
     return added
 
 
+# ---------------------------------------------------------------------------
+# Sorting into category folders
+#
+# Each download is filed into a category folder before it starts (sorter.py
+# decides; a folder picked when queueing wins). Moving a video yourself
+# teaches TubeStreamer its channel, so later uploads from that channel follow.
+# "Sort" jobs do the same for videos already sitting in the main folder.
+# ---------------------------------------------------------------------------
+
+# Files that travel with a video when it moves: our comments, and anything
+# else named after it (yt-dlp metadata, subtitles, thumbnails, Jellyfin .nfo)
+SIDECAR_ENDS = (COMMENTS_SUFFIX, ".info.json", ".description", ".srt", ".vtt", ".ass",
+                ".jpg", ".jpeg", ".png", ".webp", ".nfo")
+
+
+def choose_category(job, info, ydl=None):
+    """(folder name or "" for the main folder, reason) for a video."""
+    if job.get("category"):
+        return job["category"], "picked when queued"
+    config = load_config()
+    if not config.get("sorting_enabled", True):
+        return "", ""
+    fallback = config.get("fallback_category") or "General"
+    return sorter.classify(info, all_categories(config), fallback,
+                           learned=config.get("learned_channels"), ydl=ydl,
+                           use_ai=config.get("ai_enabled", True))
+
+
+def learn_channel(channel_id, channel, category):
+    with config_lock:
+        config = load_config()
+        config.setdefault("learned_channels", {})[channel_id] = {"category": category, "channel": channel}
+        save_config(config)
+
+
+def move_video(filename, category, reason, learn=False, extra=None):
+    """Move a video and its sidecars to a category folder ("" = main folder).
+    Returns the new relative path; raises ValueError with a message for the UI."""
+    src = resolve(filename)
+    if category and not sorter.valid_name(category):
+        raise ValueError("Invalid folder name.")
+    with jobs_cond:
+        busy = any(j.get("filename") == filename and j["status"] in ACTIVE_STATES
+                   and j.get("kind") == "comments" for j in jobs)
+    if busy:
+        raise ValueError("Its comments are being fetched; move it when that's done.")
+    with db_lock:
+        db = load_db()
+        entry = db.get(filename)
+        if not src or entry is None or not os.path.exists(src):
+            raise ValueError("The video file no longer exists.")
+        new_rel = (category + "/" if category else "") + os.path.basename(src)
+        if new_rel != filename:
+            dst = os.path.join(DOWNLOAD_DIR, *new_rel.split("/"))
+            if os.path.exists(dst):
+                raise ValueError(f"{new_rel} already exists.")
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            folder, name = os.path.split(src)
+            stem = os.path.splitext(name)[0] + "."
+            for other in os.listdir(folder):
+                if other != name and other.startswith(stem) and other.lower().endswith(SIDECAR_ENDS):
+                    shutil.move(os.path.join(folder, other), os.path.join(os.path.dirname(dst), other))
+            shutil.move(src, dst)
+            del db[filename]
+        entry.update(extra or {})
+        entry["sort_reason"] = reason
+        db[new_rel] = entry
+        save_db(db)
+    if learn and category and entry.get("channel_id"):
+        learn_channel(entry["channel_id"], entry.get("channel", ""), category)
+    return new_rel
+
+
+def run_sort_job(job):
+    """File one already-downloaded video into a category folder."""
+    filename = job["filename"]
+    with db_lock:
+        entry = load_db().get(filename)
+    if not entry or not resolve(filename) or not os.path.exists(resolve(filename)):
+        finish_job(job, "error", "The video file no longer exists.")
+        return
+    try:
+        extra = {}
+        if entry.get("url"):
+            update_job(job, msg="Fetching video info...")
+            opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True}
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(entry["url"], download=False)
+                update_job(job, msg="Choosing a folder...")
+                category, reason = choose_category(job, info, ydl)
+            extra = {"channel": info.get("channel") or info.get("uploader") or "",
+                     "channel_id": info.get("channel_id") or info.get("uploader_id") or ""}
+        else:
+            # Found on disk with no source link: the title is all there is
+            update_job(job, msg="Choosing a folder (title only)...")
+            category, reason = choose_category(job, {"title": entry.get("title", "")})
+        if job.get("_cancel"):
+            raise DownloadCancelled()
+        if not category:
+            finish_job(job, "done", "Sorting is off; left in the main folder", progress=100)
+            return
+        new_rel = move_video(filename, category, reason, extra=extra)
+        finish_job(job, "done", f"Moved to {category}", progress=100, filename=new_rel,
+                   category=category, sort_reason=reason)
+    except DownloadCancelled:
+        finish_job(job, "cancelled", "Cancelled")
+    except Exception as e:
+        finish_job(job, "error", "Sort failed: " + str(e).replace("ERROR: ", "", 1))
+
+
+@app.route("/api/categories", methods=["GET"])
+def get_categories():
+    config = load_config()
+    fallback = config.get("fallback_category") or "General"
+    counts = {}
+    with db_lock:
+        for filename in load_db():
+            counts[folder_of(filename)] = counts.get(folder_of(filename), 0) + 1
+    cats = all_categories(config)
+    for c in cats:
+        c["count"] = counts.get(c["name"], 0)
+    learned = [{"id": cid, "channel": v.get("channel", ""), "category": v.get("category", "")}
+               for cid, v in (config.get("learned_channels") or {}).items()]
+    learned.sort(key=lambda x: (x["category"].lower(), x["channel"].lower()))
+    return jsonify({
+        "categories": cats,
+        "fallback_category": fallback,
+        "fallback_count": counts.get(fallback, 0),
+        "unsorted_count": counts.get("", 0),
+        "sorting_enabled": config.get("sorting_enabled", True),
+        "ai_enabled": config.get("ai_enabled", True),
+        "ai_configured": bool(sorter.OLLAMA_URL),
+        "ai_model": sorter.OLLAMA_MODEL,
+        "learned_channels": learned,
+    })
+
+
+@app.route("/api/categories", methods=["POST"])
+def update_categories():
+    """Any of: categories (the full list), fallback_category, sorting_enabled,
+    ai_enabled, forget_channels (channel ids to unlearn)."""
+    data = request.json or {}
+    with config_lock:
+        config = load_config()
+        if "fallback_category" in data:
+            name = str(data["fallback_category"]).strip()
+            if not sorter.valid_name(name):
+                return jsonify({"error": "Invalid fallback folder name"}), 400
+            config["fallback_category"] = name
+        if "categories" in data:
+            # Folder-only entries come back from the UI too; keep them only
+            # once they have rules, so a deleted folder really disappears
+            cats = sorter.clean_categories(data["categories"])
+            config["categories"] = [c for c in cats if c["keywords"] or c["channels"]
+                                    or c["languages"] or c["description"]
+                                    or c["name"] not in category_folders()]
+        for key in ("sorting_enabled", "ai_enabled"):
+            if key in data:
+                config[key] = bool(data[key])
+        for cid in data.get("forget_channels") or []:
+            (config.get("learned_channels") or {}).pop(str(cid), None)
+        save_config(config)
+    return get_categories()
+
+
+@app.route("/api/move", methods=["POST"])
+def api_move():
+    """{"filename": "...", "category": "Warcraft"} ("" = main folder).
+    Teaches the channel unless "learn": false."""
+    data = request.json or {}
+    filename = data.get("filename", "")
+    category = str(data.get("category") or "").strip()
+    try:
+        new_rel = move_video(filename, category, "moved by you", learn=data.get("learn", True))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"filename": new_rel})
+
+
+@app.route("/api/sort", methods=["POST"])
+def api_sort():
+    """{"unsorted": true} queues a sort for every video still in the main
+    folder; {"filename": "..."} sorts one video again."""
+    data = request.json or {}
+    with db_lock:
+        db = load_db()
+    if data.get("unsorted"):
+        names = [n for n in db if not folder_of(n)]
+    elif data.get("filename") in db:
+        names = [data["filename"]]
+    else:
+        return jsonify({"error": "Give a filename or unsorted: true"}), 400
+    added = []
+    with jobs_cond:
+        pending = {j.get("filename") for j in jobs
+                   if j.get("kind") == "sort" and j["status"] in ACTIVE_STATES}
+        for n in names:
+            if n in pending or not resolve(n) or not os.path.exists(resolve(n)):
+                continue
+            entry = db[n]
+            job = new_job(entry.get("url", ""), "sort", n, entry.get("title", n))
+            jobs.append(job)
+            added.append(job)
+        if added:
+            save_queue()
+            jobs_cond.notify_all()
+    return jsonify({"queued": len(added)})
+
+
 def queue_worker(kind):
     """One worker per kind: videos download one at a time, and comment fetches
     (which can be slow) run alongside without holding videos up."""
@@ -557,6 +858,8 @@ def queue_worker(kind):
             save_queue()
         if job.get("kind") == "comments":
             run_comments_job(job)
+        elif job.get("kind") == "sort":
+            run_sort_job(job)
         else:
             run_job(job)
 
@@ -580,8 +883,12 @@ def add_to_queue():
     urls = [u for chunk in raw for u in str(chunk).split() if u.strip()]
     if not urls:
         return jsonify({"error": "No URL provided"}), 400
+    # Optional folder picked when queueing; "" or missing = sort automatically
+    category = str(data.get("category") or "").strip()
+    if category and not sorter.valid_name(category):
+        return jsonify({"error": "Invalid category name"}), 400
     with jobs_cond:
-        added = [new_job(u) for u in urls]
+        added = [new_job(u, category=category) for u in urls]
         jobs.extend(added)
         save_queue()
         jobs_cond.notify_all()
@@ -612,7 +919,7 @@ def retry_job(job_id):
             return jsonify({"error": "Not retryable"}), 400
         jobs.remove(job)
         fresh = new_job(job["url"], job.get("kind", "video"), job.get("filename", ""),
-                        job.get("title", ""), job.get("mode", "top"))
+                        job.get("title", ""), job.get("mode", "top"), job.get("category", ""))
         jobs.append(fresh)
         save_queue()
         jobs_cond.notify_all()
@@ -656,7 +963,7 @@ def video_status():
         db = load_db()
     for filename, entry in db.items():
         if entry.get("url") and video_key(entry["url"]) == key \
-                and os.path.exists(os.path.join(DOWNLOAD_DIR, filename)):
+                and resolve(filename) and os.path.exists(resolve(filename)):
             return jsonify({"state": "downloaded", "title": entry.get("title", ""), "filename": filename})
     return jsonify(failed or {"state": "none"})
 
@@ -671,9 +978,11 @@ def fetch_comments():
         with db_lock:
             names = list(load_db().keys())
         names = [n for n in names
-                 if os.path.exists(os.path.join(DOWNLOAD_DIR, n))
+                 if resolve(n) and os.path.exists(resolve(n))
                  and not os.path.exists(sidecar_paths(n)[0])]
     elif data.get("filename"):
+        if not resolve(data["filename"]):
+            return jsonify({"error": "Invalid filename"}), 400
         names = [data["filename"]]
         mode = "all" if data.get("mode") == "all" else "top"
     else:
@@ -686,10 +995,10 @@ def fetch_comments():
 
 @app.route("/api/delete/<path:filename>", methods=["DELETE"])
 def delete_video(filename):
-    # Only plain file names inside DOWNLOAD_DIR: no "../", subfolders or dotfiles
-    if filename != os.path.basename(filename) or filename.startswith("."):
+    # Only files in DOWNLOAD_DIR or a category folder: no "../" or dotfiles
+    filepath = resolve(filename)
+    if not filepath:
         return jsonify({"error": "Invalid filename"}), 400
-    filepath = os.path.join(DOWNLOAD_DIR, filename)
     with db_lock:
         db = load_db()
         if filename in db:
@@ -712,49 +1021,53 @@ def rescan():
 
 def _rescan():
     db = load_db()
-    video_exts = (".mp4", ".mkv", ".webm")
 
     # Remove stale entries (file no longer exists, or is a fragment leftover)
     removed = []
     for filename in list(db.keys()):
-        filepath = os.path.join(DOWNLOAD_DIR, filename)
-        if not filename.lower().endswith(video_exts) or not os.path.exists(filepath):
+        filepath = resolve(filename)
+        if not filename.lower().endswith(VIDEO_EXTS) or not filepath or not os.path.exists(filepath):
             del db[filename]
             removed.append(filename)
 
-    # Add any untracked video files found on disk
+    # Add any untracked video files found on disk, in the main folder and
+    # in category folders (e.g. ones you moved there by hand)
     added = []
-    for filename in os.listdir(DOWNLOAD_DIR):
-        if not filename.lower().endswith(video_exts):
-            continue
-        if filename in db:
-            continue
-        filepath = os.path.join(DOWNLOAD_DIR, filename)
-        mtime = os.path.getmtime(filepath)
-        title = os.path.splitext(filename)[0]
-        db[filename] = {
-            "title": title,
-            "thumbnail": "",
-            "duration": 0,
-            "downloaded_at": mtime,
-            "url": ""
-        }
-        added.append(filename)
+    for folder in video_dirs():
+        for name in os.listdir(folder):
+            filepath = os.path.join(folder, name)
+            filename = rel_of(filepath)
+            if name.startswith(".") or not name.lower().endswith(VIDEO_EXTS) \
+                    or filename in db or not os.path.isfile(filepath):
+                continue
+            _track_untracked(db, filename, filepath)
+            added.append(filename)
 
     save_db(db)
     return jsonify({"added": added, "removed": removed})
+
+def _track_untracked(db, filename, filepath):
+    db[filename] = {
+        "title": os.path.splitext(os.path.basename(filename))[0],
+        "thumbnail": "",
+        "duration": 0,
+        "downloaded_at": os.path.getmtime(filepath),
+        "url": ""
+    }
 
 # Clean up leftover audio/video fragments from old (pre-fix) downloads
 @app.route("/api/cleanup-fragments", methods=["POST"])
 def cleanup_fragments():
     removed = []
-    for filename in os.listdir(DOWNLOAD_DIR):
-        # yt-dlp fragment pattern: ...f<id>.m4a / .webm etc, left behind by old buggy version
-        if ".f1" in filename or ".f2" in filename or ".f3" in filename:
-            ext = os.path.splitext(filename)[1].lower()
-            if ext in (".m4a", ".webm", ".m4v"):
-                os.remove(os.path.join(DOWNLOAD_DIR, filename))
-                removed.append(filename)
+    for folder in video_dirs():
+        for filename in os.listdir(folder):
+            # yt-dlp fragment pattern: ...f<id>.m4a / .webm etc, left behind by old buggy version
+            if ".f1" in filename or ".f2" in filename or ".f3" in filename:
+                ext = os.path.splitext(filename)[1].lower()
+                if ext in (".m4a", ".webm", ".m4v"):
+                    path = os.path.join(folder, filename)
+                    os.remove(path)
+                    removed.append(rel_of(path))
     return jsonify({"removed": removed})
 
 if __name__ == "__main__":
@@ -762,6 +1075,7 @@ if __name__ == "__main__":
     load_queue()
     threading.Thread(target=queue_worker, args=("video",), daemon=True).start()
     threading.Thread(target=queue_worker, args=("comments",), daemon=True).start()
+    threading.Thread(target=queue_worker, args=("sort",), daemon=True).start()
     cleanup_thread = threading.Thread(target=run_cleanup, daemon=True)
     cleanup_thread.start()
     app.run(host="0.0.0.0", port=5000, debug=False)
