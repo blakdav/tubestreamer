@@ -643,6 +643,14 @@ def queue_comments(filenames, mode="top", total_on_site=None):
 # "Sort" jobs do the same for videos already sitting in the main folder.
 # ---------------------------------------------------------------------------
 
+# Sort reasons that mean you chose the folder; re-sorting never overrides them
+MANUAL_REASONS = ("moved by you", "picked when queued")
+
+
+def resortable(rel, entry, fallback):
+    return folder_of(rel) == fallback and entry.get("sort_reason") not in MANUAL_REASONS
+
+
 # Files that travel with a video when it moves: our comments, and anything
 # else named after it (yt-dlp metadata, subtitles, thumbnails, Jellyfin .nfo)
 SIDECAR_ENDS = (COMMENTS_SUFFIX, ".info.json", ".description", ".srt", ".vtt", ".ass",
@@ -736,7 +744,9 @@ def run_sort_job(job):
             finish_job(job, "done", "Sorting is off; left in the main folder", progress=100)
             return
         new_rel = move_video(filename, category, reason, extra=extra)
-        finish_job(job, "done", f"Moved to {category}", progress=100, filename=new_rel,
+        stayed = folder_of(filename) == category
+        finish_job(job, "done", f"Stayed in {category}" if stayed else f"Moved to {category}",
+                   progress=100, filename=new_rel,
                    category=category, sort_reason=reason)
     except DownloadCancelled:
         finish_job(job, "cancelled", "Cancelled")
@@ -748,10 +758,11 @@ def run_sort_job(job):
 def get_categories():
     config = load_config()
     fallback = config.get("fallback_category") or "General"
-    counts = {}
+    counts, resort = {}, 0
     with db_lock:
-        for filename in load_db():
+        for filename, entry in load_db().items():
             counts[folder_of(filename)] = counts.get(folder_of(filename), 0) + 1
+            resort += resortable(filename, entry, fallback)
     cats = all_categories(config)
     for c in cats:
         c["count"] = counts.get(c["name"], 0)
@@ -763,6 +774,7 @@ def get_categories():
         "fallback_category": fallback,
         "fallback_count": counts.get(fallback, 0),
         "unsorted_count": counts.get("", 0),
+        "fallback_resortable": resort,
         "sorting_enabled": config.get("sorting_enabled", True),
         "ai_enabled": config.get("ai_enabled", True),
         "ai_configured": bool(sorter.OLLAMA_URL),
@@ -816,16 +828,20 @@ def api_move():
 @app.route("/api/sort", methods=["POST"])
 def api_sort():
     """{"unsorted": true} queues a sort for every video still in the main
-    folder; {"filename": "..."} sorts one video again."""
+    folder; {"fallback": true} re-sorts the fallback folder (General), except
+    videos you put there yourself; {"filename": "..."} sorts one video again."""
     data = request.json or {}
     with db_lock:
         db = load_db()
     if data.get("unsorted"):
         names = [n for n in db if not folder_of(n)]
+    elif data.get("fallback"):
+        fallback = load_config().get("fallback_category") or "General"
+        names = [n for n, e in db.items() if resortable(n, e, fallback)]
     elif data.get("filename") in db:
         names = [data["filename"]]
     else:
-        return jsonify({"error": "Give a filename or unsorted: true"}), 400
+        return jsonify({"error": "Give a filename, unsorted: true or fallback: true"}), 400
     added = []
     with jobs_cond:
         pending = {j.get("filename") for j in jobs

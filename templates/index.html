@@ -604,6 +604,7 @@
           <button class="btn btn-ghost" onclick="addCategory()">+ Add category</button>
           <button class="btn" onclick="saveCategories()">Save rules</button>
           <button class="btn btn-ghost" id="sort-unsorted-btn" onclick="sortUnsorted()">Sort unsorted videos</button>
+          <button class="btn btn-ghost" id="resort-fallback-btn" onclick="resortFallback()" title="Run the videos in the fallback folder through the current rules again. Videos you moved there or picked it for are left alone.">Re-sort General</button>
           <span class="save-indicator" id="sort-indicator" style="margin:0"></span>
         </div>
         <div id="learned-wrap" hidden>
@@ -743,6 +744,9 @@
     const btn = document.getElementById('sort-unsorted-btn');
     btn.textContent = `Sort unsorted videos (${s.unsorted_count})`;
     btn.disabled = !s.unsorted_count;
+    const rb = document.getElementById('resort-fallback-btn');
+    rb.textContent = `Re-sort ${s.fallback_category} (${s.fallback_resortable})`;
+    rb.disabled = !s.fallback_resortable;
     if (redraw) { editingCats = s.categories.map(c => ({ ...c })); renderCategories(); }
     renderLearned();
     fillFolderSelects();
@@ -844,6 +848,16 @@
     const n = sortInfo ? sortInfo.unsorted_count : 0;
     if (!confirm(`Sort the ${n} video(s) in the main folder into category folders? Each one's info is fetched again from YouTube; watch progress in the queue.`)) return;
     const r = await fetch('/api/sort', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ unsorted: true }) });
+    const d = await r.json();
+    if (!r.ok) alert(d.error || 'Could not queue');
+    loadQueue();
+  }
+
+  async function resortFallback() {
+    const n = sortInfo ? sortInfo.fallback_resortable : 0;
+    const name = sortInfo ? sortInfo.fallback_category : 'General';
+    if (!confirm(`Run the ${n} video(s) in ${name} through the current rules again? Videos you moved there yourself stay put. Each one's info is fetched again from YouTube; watch progress in the queue.`)) return;
+    const r = await fetch('/api/sort', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ fallback: true }) });
     const d = await r.json();
     if (!r.ok) alert(d.error || 'Could not queue');
     loadQueue();
