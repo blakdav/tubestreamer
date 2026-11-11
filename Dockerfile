@@ -7,7 +7,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir flask apscheduler \
     && pip install --no-cache-dir --pre "yt-dlp[default]"
 
-COPY app.py sorter.py ./
+COPY app.py sorter.py gpulock.py ./
 COPY templates/ templates/
 
 EXPOSE 5000

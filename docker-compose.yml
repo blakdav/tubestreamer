@@ -7,12 +7,18 @@ services:
       - "5005:5000"
     volumes:
       - /mnt/user/media/youtube:/downloads
+      # Optional: a folder shared with other apps that use the GPU (Vidscribe,
+      # reddit2md), same host path in each compose file.
+      # - /path/to/shared-gpu-folder:/gpu
     environment:
       - DOWNLOAD_DIR=/downloads
       # Optional: a local Ollama server (as seen from this container) to sort
       # videos the folder rules can't decide. Leave out for rules only.
       # - OLLAMA_URL=http://your-ollama-host:11434
       # - OLLAMA_MODEL=qwen3:4b
+      # With the shared folder above: while another app has the GPU (e.g. a
+      # transcription), sorting skips the AI and uses the fallback folder.
+      # - GPU_LOCK_FILE=/gpu/lock
     # Lets OLLAMA_URL=http://host.docker.internal:11434 reach an Ollama on
     # this same host.
     extra_hosts:

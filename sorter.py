@@ -18,6 +18,7 @@ decides:
 6. The fallback folder ("General" unless you rename it).
 """
 
+import gpulock
 import json
 import os
 import re
@@ -29,6 +30,7 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "").strip().rstrip("/")
 # GPU to Vidscribe's transcriptions if they share it.
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:4b").strip()
 OLLAMA_TIMEOUT = 120
+GPU = gpulock.GpuLock("TubeStreamer")
 
 CAPTION_SECONDS = 180       # how much of the captions to read
 CAPTION_CHARS = 4000
@@ -290,7 +292,17 @@ def classify(info, categories, fallback, learned=None, ydl=None, use_ai=True):
 
     ai_note = ""
     if use_ai and OLLAMA_URL and categories:
-        name, err = ask_ollama(categories, fallback, info, captions)
+        # The GPU is shared with Vidscribe and reddit2md (GPU_LOCK_FILE, see
+        # gpulock.py). Sorting runs before a download starts, so it never
+        # waits: if the GPU is busy (e.g. a transcription), skip the AI and
+        # use the fallback folder; "Re-sort General" can sort it later.
+        if not GPU.try_acquire("sorting a video"):
+            holder = GPU.holder() or "another app"
+            return fallback, f"no match; AI skipped: GPU busy ({holder})"
+        try:
+            name, err = ask_ollama(categories, fallback, info, captions)
+        finally:
+            GPU.release()
         if name:
             return name, f"AI ({OLLAMA_MODEL})"
         ai_note = f"; AI failed: {err}"

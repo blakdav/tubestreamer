@@ -142,6 +142,13 @@ from a short list doesn't need a big model. It's unloaded right after each answe
 needs. If Ollama can't be reached, the video goes to the fallback folder and the reason
 says why.
 
+**Sharing the GPU** with apps like Vidscribe or reddit2md: mount the same host folder
+into each container (e.g. `/opt/docker/gpu` at `/gpu`) and set `GPU_LOCK_FILE=/gpu/lock`
+in each. While another app holds the GPU (say, a transcription), sorting doesn't wait,
+because it runs before the download starts: it skips the AI and files the video in the
+fallback folder, with the reason "AI skipped: GPU busy (Vidscribe: transcribing)".
+**Re-sort General** sorts those later.
+
 ### Other apps
 
 Files move between folders, so tools that track videos by path lose track unless they
